@@ -206,6 +206,30 @@ func (s *Store) Delete(id string) error {
 	return nil
 }
 
+// BlobCount returns the number of committed blobs in blobs/.
+func (s *Store) BlobCount() (int, error) {
+	entries, err := os.ReadDir(s.blobs)
+	if err != nil {
+		return 0, fmt.Errorf("storage: count: %w", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), tmpPrefix) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// FreeBytes returns the free space on the filesystem holding blobs/.
+func (s *Store) FreeBytes() (uint64, error) {
+	n, err := freeBytes(s.blobs)
+	if err != nil {
+		return 0, fmt.Errorf("storage: free bytes: %w", err)
+	}
+	return n, nil
+}
+
 // quarantineBlob moves blobs/<id> to quarantine/. If quarantine/<id> is
 // already taken the file gets a numeric suffix, so nothing in quarantine/
 // is ever overwritten.

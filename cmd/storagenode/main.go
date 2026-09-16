@@ -1,10 +1,101 @@
 // Command storagenode serves checksummed blobs from local disk for a Cairn cluster.
 package main
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-const version = "0.1.0"
+	"github.com/manavmann/distributed-object-storage/internal/config"
+	"github.com/manavmann/distributed-object-storage/internal/storage"
+)
+
+const (
+	version         = "0.1.0"
+	shutdownTimeout = 10 * time.Second
+)
 
 func main() {
-	fmt.Printf("storagenode %s\n", version)
+	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	cfg, err := config.LoadNode(os.Getenv)
+	if err != nil {
+		log.Error("node.config", "err", err)
+		os.Exit(2)
+	}
+	ln, err := net.Listen("tcp", cfg.Addr)
+	if err != nil {
+		log.Error("node.listen", "addr", cfg.Addr, "err", err)
+		os.Exit(1)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := serve(ctx, cfg, ln, log); err != nil {
+		log.Error("node.exit", "err", err)
+		os.Exit(1)
+	}
+}
+
+// serve runs the node on ln until ctx is done, then drains in-flight
+// requests and waits for the heartbeat loop before returning.
+func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slog.Logger) error {
+	store, err := storage.Open(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Handler:           storage.NewHandler(store, log),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	log.Info("node.start", "version", version, "node_id", cfg.NodeID, "addr", ln.Addr().String(),
+		"data_dir", cfg.DataDir, "coordinator", cfg.CoordinatorURL)
+
+	hbCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		storage.RunHeartbeat(hbCtx, &http.Client{Timeout: cfg.HeartbeatInterval}, cfg.CoordinatorURL,
+			cfg.HeartbeatInterval, func() storage.Heartbeat { return status(cfg, store, log) }, log)
+	}()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+
+	select {
+	case err := <-serveErr:
+		stopHeartbeat()
+		<-heartbeatDone
+		return fmt.Errorf("serve: %w", err)
+	case <-ctx.Done():
+	}
+	log.Info("node.shutdown")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	err = srv.Shutdown(shutdownCtx)
+	stopHeartbeat()
+	<-heartbeatDone
+	if serr := <-serveErr; !errors.Is(serr, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", serr)
+	}
+	return err
+}
+
+// status is what each heartbeat reports. Counting failures are logged and
+// reported as zero rather than skipping the heartbeat.
+func status(cfg config.NodeConfig, store *storage.Store, log *slog.Logger) storage.Heartbeat {
+	count, err := store.BlobCount()
+	if err != nil {
+		log.Warn("node.blob_count", "err", err)
+	}
+	free, err := store.FreeBytes()
+	if err != nil {
+		log.Warn("node.free_bytes", "err", err)
+	}
+	return storage.Heartbeat{NodeID: cfg.NodeID, Addr: cfg.AdvertiseAddr, BlobCount: count, FreeBytes: free}
 }
