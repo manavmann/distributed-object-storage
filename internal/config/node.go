@@ -22,6 +22,8 @@ var ErrInvalidConfig = errors.New("config: invalid")
 //	CAIRN_DATA_DIR            ./data                   root of blobs/ and quarantine/
 //	CAIRN_COORDINATOR_URL     http://localhost:9000    coordinator base URL
 //	CAIRN_HEARTBEAT_INTERVAL  5s                       time between heartbeats
+//	CAIRN_SCRUB_INTERVAL      1h                       time between scrub passes over blobs/
+//	CAIRN_SCRUB_DELAY         10ms                     pause before each blob within a pass
 type NodeConfig struct {
 	NodeID            string
 	Addr              string
@@ -29,6 +31,8 @@ type NodeConfig struct {
 	DataDir           string
 	CoordinatorURL    string
 	HeartbeatInterval time.Duration
+	ScrubInterval     time.Duration
+	ScrubDelay        time.Duration
 }
 
 // LoadNode builds a NodeConfig from getenv (normally os.Getenv), applying
@@ -51,10 +55,19 @@ func LoadNode(getenv func(string) string) (NodeConfig, error) {
 		DataDir:        get("CAIRN_DATA_DIR", "./data"),
 		CoordinatorURL: get("CAIRN_COORDINATOR_URL", "http://localhost:9000"),
 	}
-	interval := get("CAIRN_HEARTBEAT_INTERVAL", "5s")
-	c.HeartbeatInterval, err = time.ParseDuration(interval)
-	if err != nil {
-		return NodeConfig{}, fmt.Errorf("%w: CAIRN_HEARTBEAT_INTERVAL %q: %w", ErrInvalidConfig, interval, err)
+	for _, d := range []struct {
+		name, def string
+		dst       *time.Duration
+	}{
+		{"CAIRN_HEARTBEAT_INTERVAL", "5s", &c.HeartbeatInterval},
+		{"CAIRN_SCRUB_INTERVAL", "1h", &c.ScrubInterval},
+		{"CAIRN_SCRUB_DELAY", "10ms", &c.ScrubDelay},
+	} {
+		v := get(d.name, d.def)
+		*d.dst, err = time.ParseDuration(v)
+		if err != nil {
+			return NodeConfig{}, fmt.Errorf("%w: %s %q: %w", ErrInvalidConfig, d.name, v, err)
+		}
 	}
 	if err := c.Validate(); err != nil {
 		return NodeConfig{}, err
@@ -73,8 +86,17 @@ func (c NodeConfig) Validate() error {
 	if c.DataDir == "" {
 		return fmt.Errorf("%w: CAIRN_DATA_DIR is empty", ErrInvalidConfig)
 	}
-	if c.HeartbeatInterval <= 0 {
-		return fmt.Errorf("%w: CAIRN_HEARTBEAT_INTERVAL must be positive, got %s", ErrInvalidConfig, c.HeartbeatInterval)
+	for _, d := range []struct {
+		name string
+		val  time.Duration
+	}{
+		{"CAIRN_HEARTBEAT_INTERVAL", c.HeartbeatInterval},
+		{"CAIRN_SCRUB_INTERVAL", c.ScrubInterval},
+		{"CAIRN_SCRUB_DELAY", c.ScrubDelay},
+	} {
+		if d.val <= 0 {
+			return fmt.Errorf("%w: %s must be positive, got %s", ErrInvalidConfig, d.name, d.val)
+		}
 	}
 	for _, u := range []struct{ name, val string }{
 		{"CAIRN_ADVERTISE_ADDR", c.AdvertiseAddr},

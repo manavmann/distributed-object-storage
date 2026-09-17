@@ -38,7 +38,7 @@ func TestHeartbeatPostsAndSurvives500s(t *testing.T) {
 		defer close(done)
 		RunHeartbeat(ctx, coord.Client(), coord.URL, 5*time.Millisecond, func() Heartbeat {
 			return Heartbeat{NodeID: "n1", Addr: "http://n1:9100", BlobCount: int(seq.Add(1)), FreeBytes: 42}
-		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		}, func(Heartbeat) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
 
 	for i := 1; i <= 3; i++ {
@@ -77,7 +77,7 @@ func TestHeartbeatUnreachableCoordinator(t *testing.T) {
 				cancel()
 			}
 			return Heartbeat{NodeID: "n1"}
-		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		}, func(Heartbeat) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
 	select {
 	case <-done:

@@ -56,10 +56,11 @@ func main() {
 }
 
 // serve runs the node on ln until ctx is done, then drains in-flight
-// requests and waits for the heartbeat loop before returning.
+// requests and waits for the heartbeat and scrub loops before returning.
 func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slog.Logger) error {
 	node, err := storage.NewNode(cfg.DataDir, storage.NodeOptions{
-		ID: cfg.NodeID, HeartbeatInterval: cfg.HeartbeatInterval, Metrics: metrics.New(), Log: log,
+		ID: cfg.NodeID, HeartbeatInterval: cfg.HeartbeatInterval,
+		ScrubInterval: cfg.ScrubInterval, ScrubDelay: cfg.ScrubDelay, Metrics: metrics.New(), Log: log,
 	})
 	if err != nil {
 		return err
@@ -74,16 +75,18 @@ func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slo
 	log.Info(events.NodeStart, "version", version, "node_id", cfg.NodeID, "addr", ln.Addr().String(),
 		"data_dir", cfg.DataDir, "coordinator", cfg.CoordinatorURL)
 
-	hbCtx, stopHeartbeat := context.WithCancel(ctx)
-	heartbeatDone := node.StartHeartbeat(hbCtx, cfg.CoordinatorURL, cfg.AdvertiseAddr)
+	loopCtx, stopLoops := context.WithCancel(ctx)
+	heartbeatDone := node.StartHeartbeat(loopCtx, cfg.CoordinatorURL, cfg.AdvertiseAddr)
+	scrubDone := node.StartScrub(loopCtx)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
 	select {
 	case err := <-serveErr:
-		stopHeartbeat()
+		stopLoops()
 		<-heartbeatDone
+		<-scrubDone
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 	}
@@ -91,8 +94,9 @@ func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slo
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err = srv.Shutdown(shutdownCtx)
-	stopHeartbeat()
+	stopLoops()
 	<-heartbeatDone
+	<-scrubDone
 	if serr := <-serveErr; !errors.Is(serr, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", serr)
 	}

@@ -13,6 +13,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/blob"
 )
@@ -205,6 +207,43 @@ func (s *Store) Delete(id string) error {
 		return fmt.Errorf("storage: delete %s: %w", id, err)
 	}
 	return nil
+}
+
+// Scrub reads every committed blob through Read, one blob per delay, so
+// each is fully verified and a corrupt one is quarantined exactly as a
+// client read would. corrupt is called with the id of each blob that
+// failed. A blob deleted mid-pass is skipped; I/O errors are collected and
+// returned together once the pass ends. It returns nil early when ctx is
+// done.
+func (s *Store) Scrub(ctx context.Context, delay time.Duration, corrupt func(id string)) error {
+	entries, err := os.ReadDir(s.blobs)
+	if err != nil {
+		return fmt.Errorf("storage: scrub: %w", err)
+	}
+	t := time.NewTicker(delay)
+	defer t.Stop()
+	var errs []error
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), tmpPrefix) {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+		}
+		b, err := s.Read(e.Name())
+		switch {
+		case err == nil:
+			b.Close()
+		case errors.Is(err, ErrCorrupt):
+			corrupt(e.Name())
+		case errors.Is(err, ErrNotFound):
+		default:
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // BlobCount returns the number of committed blobs in blobs/.

@@ -88,7 +88,7 @@ type putResponse struct {
 //	DELETE /v1/{bucket}/{key...}  204 | 400 | 404 no bucket
 //	GET    /healthz               200
 //	POST   /internal/heartbeat    204 | 400 InvalidHeartbeat
-//	GET    /cluster/status        200 {nodes:[...],under_replicated: blobs with fewer than RF UP holders}
+//	GET    /cluster/status        200 {nodes:[...],under_replicated: blobs with fewer than RF UP holders}; each node carries scrub_failures, the corrupt copies it has reported
 //	GET    /cluster/locate        200 {blob_id,size,sha256,replicas,placement}; ?bucket=&key= | 400 | 404
 //	GET    /metrics               200 Prometheus text format
 //
@@ -133,6 +133,7 @@ type statusNode struct {
 	Status          string    `json:"status"`
 	FreeBytes       uint64    `json:"free_bytes"`
 	BlobCount       int       `json:"blob_count"`
+	ScrubFailures   int       `json:"scrub_failures"`
 	LastSeen        time.Time `json:"last_seen"`
 	StatusChangedAt time.Time `json:"status_changed_at"`
 }
@@ -153,6 +154,17 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	// The node quarantined these copies, so metadata must stop counting
+	// them; the repair worker then restores RF. The node keeps reporting
+	// an id until it gets a 2xx, and dropping twice is harmless.
+	for _, blobID := range hb.ScrubFailures {
+		s.metrics.IntegrityFailures.Inc()
+		s.log.Warn(events.IntegrityFailure, "blob_id", blobID, "node_id", hb.NodeID, "source", "scrub")
+		if err := s.meta.DropReplica(r.Context(), blobID, hb.NodeID); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -167,7 +179,8 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 	for _, n := range all {
 		resp.Nodes = append(resp.Nodes, statusNode{
 			NodeID: n.ID, Addr: n.Addr, Status: n.Status, FreeBytes: n.FreeBytes, BlobCount: n.BlobCount,
-			LastSeen: n.LastSeen.UTC(), StatusChangedAt: n.StatusChangedAt.UTC(),
+			ScrubFailures: n.ScrubFailures,
+			LastSeen:      n.LastSeen.UTC(), StatusChangedAt: n.StatusChangedAt.UTC(),
 		})
 	}
 	httpx.WriteJSON(w, http.StatusOK, resp)

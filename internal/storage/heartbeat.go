@@ -17,19 +17,26 @@ type Heartbeat struct {
 	Addr      string `json:"addr"`
 	BlobCount int    `json:"blob_count"`
 	FreeBytes uint64 `json:"free_bytes"`
+	// ScrubFailures are the ids of blobs the scrubber found corrupt and
+	// quarantined since the last acknowledged heartbeat.
+	ScrubFailures []string `json:"scrub_failures,omitempty"`
 }
 
 // RunHeartbeat POSTs status() to coordinatorURL/internal/heartbeat once
-// immediately and then every interval until ctx is done. A failed post is
-// logged and the loop carries on; the coordinator's health monitor, not the
+// immediately and then every interval until ctx is done, calling acked
+// with each heartbeat the coordinator accepted. A failed post is logged
+// and the loop carries on; the coordinator's health monitor, not the
 // node, decides what a missed heartbeat means.
-func RunHeartbeat(ctx context.Context, client *http.Client, coordinatorURL string, interval time.Duration, status func() Heartbeat, log *slog.Logger) {
+func RunHeartbeat(ctx context.Context, client *http.Client, coordinatorURL string, interval time.Duration, status func() Heartbeat, acked func(Heartbeat), log *slog.Logger) {
 	url := coordinatorURL + "/internal/heartbeat"
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		if err := postHeartbeat(ctx, client, url, status()); err != nil {
+		hb := status()
+		if err := postHeartbeat(ctx, client, url, hb); err != nil {
 			log.Warn(events.NodeHeartbeatFailed, "coordinator", url, "err", err)
+		} else {
+			acked(hb)
 		}
 		select {
 		case <-ctx.Done():

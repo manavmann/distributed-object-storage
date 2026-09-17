@@ -30,6 +30,7 @@ func TestServeWithoutCoordinator(t *testing.T) {
 	cfg := config.NodeConfig{
 		NodeID: "test", Addr: ln.Addr().String(), AdvertiseAddr: "http://" + ln.Addr().String(),
 		DataDir: t.TempDir(), CoordinatorURL: coordinator, HeartbeatInterval: 10 * time.Millisecond,
+		ScrubInterval: time.Hour, ScrubDelay: 10 * time.Millisecond,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)

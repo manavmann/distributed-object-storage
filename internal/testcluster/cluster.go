@@ -56,6 +56,12 @@ type Opts struct {
 	// MaxUploads is how many PUTs the coordinator lets spool or replicate
 	// at once. Default 16.
 	MaxUploads int
+	// ScrubInterval is how often each node verifies its blobs and
+	// ScrubDelay the pause before each blob. Defaults 1h and 10ms, the
+	// production defaults, so only tests that ask for a shorter interval
+	// ever scrub.
+	ScrubInterval time.Duration
+	ScrubDelay    time.Duration
 }
 
 // Cluster is a running coordinator plus its nodes. Its methods must be
@@ -95,6 +101,8 @@ type node struct {
 	srv           *httptest.Server
 	stopHeartbeat context.CancelFunc
 	heartbeatDone <-chan struct{}
+	stopScrub     context.CancelFunc
+	scrubDone     <-chan struct{}
 }
 
 // New starts opts.Nodes storage nodes and a coordinator on ephemeral ports
@@ -128,6 +136,12 @@ func New(t *testing.T, opts Opts) *Cluster {
 	}
 	if opts.MaxUploads == 0 {
 		opts.MaxUploads = 16
+	}
+	if opts.ScrubInterval == 0 {
+		opts.ScrubInterval = time.Hour
+	}
+	if opts.ScrubDelay == 0 {
+		opts.ScrubDelay = 10 * time.Millisecond
 	}
 	transport := &http.Transport{MaxIdleConnsPerHost: idleConns}
 	t.Cleanup(transport.CloseIdleConnections)
@@ -234,18 +248,22 @@ func (c *Cluster) coordURL() string {
 	return c.coordServer().URL
 }
 
-// startNode opens n's directory, serves it and starts its heartbeat loop
-// against the current coordinator.
+// startNode opens n's directory, serves it, starts its scrubber and
+// starts its heartbeat loop against the current coordinator.
 func (c *Cluster) startNode(n *node) {
 	c.t.Helper()
 	sn, err := storage.NewNode(n.dir, storage.NodeOptions{
-		ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval, Metrics: metrics.New(), Log: c.log,
+		ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval,
+		ScrubInterval: c.opts.ScrubInterval, ScrubDelay: c.opts.ScrubDelay, Metrics: metrics.New(), Log: c.log,
 	})
 	if err != nil {
 		c.t.Fatal(err)
 	}
 	n.sn = sn
 	n.srv = httptest.NewServer(n.faults.wrap(sn.Handler()))
+	ctx, cancel := context.WithCancel(context.Background())
+	n.stopScrub = cancel
+	n.scrubDone = sn.StartScrub(ctx)
 	c.startHeartbeat(n)
 }
 
@@ -267,6 +285,8 @@ func (c *Cluster) stopNode(n *node) {
 		return
 	}
 	c.stopHeartbeat(n)
+	n.stopScrub()
+	<-n.scrubDone
 	n.srv.CloseClientConnections()
 	n.srv.Close()
 	n.srv = nil

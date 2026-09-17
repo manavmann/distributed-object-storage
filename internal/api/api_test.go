@@ -432,13 +432,13 @@ func TestClusterStatusShape(t *testing.T) {
 		t.Fatalf("status nodes = %s: %v", st["nodes"], err)
 	}
 	n := nodes[0]
-	for _, k := range []string{"node_id", "addr", "status", "free_bytes", "blob_count", "last_seen", "status_changed_at"} {
+	for _, k := range []string{"node_id", "addr", "status", "free_bytes", "blob_count", "scrub_failures", "last_seen", "status_changed_at"} {
 		if n[k] == nil {
 			t.Errorf("status node lacks %q: %s", k, st["nodes"])
 		}
 	}
-	if len(n) != 7 {
-		t.Errorf("status node has %d fields, want 7: %s", len(n), st["nodes"])
+	if len(n) != 8 {
+		t.Errorf("status node has %d fields, want 8: %s", len(n), st["nodes"])
 	}
 	if string(n["node_id"]) != `"`+c.NodeID(0)+`"` || string(n["status"]) != `"UP"` {
 		t.Errorf("status node = %s", st["nodes"])

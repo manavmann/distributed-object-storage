@@ -165,3 +165,47 @@ func TestAllCorruptNoSource(t *testing.T) {
 		}
 	}
 }
+
+// TestScrubFindsCorruptCopyWithoutRead corrupts one copy and never reads
+// the object: the node's scrubber must quarantine it, the heartbeat must
+// carry it to the coordinator (visible as scrub_failures in status), and
+// repair must restore RF, all without a client GET.
+func TestScrubFindsCorruptCopyWithoutRead(t *testing.T) {
+	t.Parallel()
+	c := testcluster.New(t, testcluster.Opts{
+		Nodes: 4, RF: 3, W: 2, NodeRequestTimeout: 5 * time.Second,
+		HeartbeatInterval: fastHeartbeat, HeartbeatTimeout: fastHeartbeatTimeout,
+		RepairInterval: gcInterval, RepairGrace: time.Millisecond,
+		ScrubInterval: 50 * time.Millisecond, ScrubDelay: time.Millisecond,
+	})
+	cl := c.Client()
+	if err := cl.CreateBucket("bkt"); err != nil {
+		t.Fatal(err)
+	}
+	blobID, ids, _ := putOnThree(t, c, "k")
+	bad := nodeIndex(t, c, 4, ids[0])
+	badID := c.NodeID(bad)
+	c.CorruptBlob(bad, blobID)
+
+	testcluster.WaitFor(t, func() bool { return c.Quarantined(bad, blobID) }, "scrubber quarantines the corrupt copy")
+	testcluster.WaitFor(t, func() bool {
+		n, ok := nodeStatus(t, c, badID)
+		return ok && n.ScrubFailures == 1
+	}, badID+" reports scrub_failures 1")
+	for i := 0; i < 4; i++ {
+		if n, ok := nodeStatus(t, c, c.NodeID(i)); i != bad && (!ok || n.ScrubFailures != 0) {
+			t.Fatalf("%s reports scrub_failures %d, want 0", c.NodeID(i), n.ScrubFailures)
+		}
+	}
+
+	waitFullyReplicated(t, c, blobID)
+	if !c.Quarantined(bad, blobID) {
+		t.Fatalf("repair removed the quarantined copy on %s", badID)
+	}
+	if got := underReplicated(t, c); got != 0 {
+		t.Fatalf("under_replicated after repair = %d, want 0", got)
+	}
+	if obj, err := cl.Get("bkt", "k"); err != nil || string(obj.Body) != "payload for k" {
+		t.Fatalf("GET after scrub-driven repair = %q, %v", obj.Body, err)
+	}
+}

@@ -78,6 +78,7 @@ type NodeStatus struct {
 	Status          string    `json:"status"`
 	FreeBytes       uint64    `json:"free_bytes"`
 	BlobCount       int       `json:"blob_count"`
+	ScrubFailures   int       `json:"scrub_failures"`
 	LastSeen        time.Time `json:"last_seen"`
 	StatusChangedAt time.Time `json:"status_changed_at"`
 }

@@ -37,16 +37,22 @@ type Heartbeat struct {
 	Addr      string `json:"addr"`
 	BlobCount int    `json:"blob_count"`
 	FreeBytes uint64 `json:"free_bytes"`
+	// ScrubFailures are the blob ids the node's scrubber quarantined since
+	// its last accepted heartbeat.
+	ScrubFailures []string `json:"scrub_failures,omitempty"`
 }
 
 // Node is the registry's view of one storage node.
 type Node struct {
 	ID string
 	// Addr is the node's base URL, e.g. http://10.0.0.5:9100.
-	Addr            string
-	Status          string
-	FreeBytes       uint64
-	BlobCount       int
+	Addr      string
+	Status    string
+	FreeBytes uint64
+	BlobCount int
+	// ScrubFailures counts the corrupt blobs the node has reported since
+	// this registry was loaded.
+	ScrubFailures   int
 	LastSeen        time.Time
 	StatusChangedAt time.Time
 }
@@ -88,8 +94,9 @@ func Load(ctx context.Context, db *meta.DB, timeout time.Duration, now func() ti
 }
 
 // Heartbeat records hb: it refreshes the node's address, stats and
-// lastSeen, persists the row on first sight or an address change, and
-// marks a node that was not UP as UP (persisted, logged as node_up).
+// lastSeen and scrub failure count, persists the row on first sight or
+// an address change, and marks a node that was not UP as UP (persisted,
+// logged as node_up).
 func (r *Registry) Heartbeat(ctx context.Context, hb Heartbeat) error {
 	if hb.NodeID == "" {
 		return fmt.Errorf("%w: empty node_id", ErrInvalidHeartbeat)
@@ -125,6 +132,7 @@ func (r *Registry) Heartbeat(ctx context.Context, hb Heartbeat) error {
 	n.Addr = hb.Addr
 	n.FreeBytes = hb.FreeBytes
 	n.BlobCount = hb.BlobCount
+	n.ScrubFailures += len(hb.ScrubFailures)
 	n.LastSeen = now
 	r.nodes[hb.NodeID] = n
 	if !known || wasDown {

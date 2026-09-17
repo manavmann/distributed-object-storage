@@ -1,9 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C26. C26: scripts/demo.sh (status→bucket→8 MiB PUT→locate→GET→stop holder→GET→repair→corrupt→GET→repair→restart→metrics→go test -race) wired to `make demo` (`make demo -- -y` skips pauses); MIT LICENSE; go mod tidy no-op.
-Next: C27 — (next roadmap item)
-
+Done: C1–C27. C27: cmd/cairnctl (mb ls put get rm status locate; -url from CAIRN_URL; streams file bodies via *os.File/io.Copy; ls pages to exhaustion; 219 lines).
+Next: C28 — (next roadmap item)
 ## Hours ledger
 | Item | Est | Actual | Notes |
 |---|---|---|---|
@@ -33,5 +32,6 @@ Next: C27 — (next roadmap item)
 | C24 | | | cmd/bench -race -count=5 clean; `make bench` printed both tables against `make up`; the compose x-node anchor's CAIRN_HEARTBEAT_INTERVAL never reached the nodes (a service `environment:` replaces the anchor's map, it doesn't merge) so `make up` flapped DOWN/UP every 5s at idle and every bench cell hit InsufficientReplicas — fixed by repeating the interval per node; in-flight requests finish at the deadline rather than being cancelled, so the measured window is ≥ duration, never exactly it; heartbeats still starve behind PUT commits on the single DB conn under put 32MiB c=32 (10 errors in that cell); GET pre-population of 64 × 32MiB dominates the GET rows' wall time |
 | C25 | | | Revisons and fixes
 | C26 | | | `make demo -- -y` PASS in 60s from `make down && make up`; make lint test clean; after `--` make turns `-y` into a goal, so the Makefile has a no-op `-y` target and forwards `$(filter -y,$(MAKECMDGOALS))`; the corrupt-copy dip in locate lasts ~350ms (drop + re-repair onto the same node within one tick) so the demo detects it via cairn_integrity_failures_total and the node's quarantine/ listing, not a locate poll — smoke.sh's RF−1 locate assertion is the same race and only passes by tick timing |
+| C27 | | | cmd/cairnctl -race -count=5 clean; verified against `make up`: 8 MiB put/get byte-identical, rm → 404 exit 1; a zero-byte put must set http.NoBody or net/http sends chunked and the API 411s; bucket names must be ≥3 chars so the test uses "ctl" not "b"; key segments are PathEscaped so "dir/k 1" round-trips |
 
 

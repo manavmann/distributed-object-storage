@@ -60,6 +60,8 @@ const (
 	NodeHeartbeatFailed = "node.heartbeat_failed"
 	NodeBlobCount       = "node.blob_count"
 	NodeFreeBytes       = "node.free_bytes"
+	ScrubFailure        = "scrub_failure"
+	NodeScrubError      = "node.scrub_error"
 )
 
 // Process lifecycle, coordinator binary.

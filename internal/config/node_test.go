@@ -23,6 +23,8 @@ func TestLoadNodeTable(t *testing.T) {
 		"CAIRN_DATA_DIR":           "/var/cairn",
 		"CAIRN_COORDINATOR_URL":    "https://coord.example:9000",
 		"CAIRN_HEARTBEAT_INTERVAL": "250ms",
+		"CAIRN_SCRUB_INTERVAL":     "2m",
+		"CAIRN_SCRUB_DELAY":        "3ms",
 	}
 	with := func(k, v string) map[string]string {
 		m := map[string]string{}
@@ -41,18 +43,25 @@ func TestLoadNodeTable(t *testing.T) {
 		{name: "defaults", env: nil, want: NodeConfig{
 			NodeID: hostname, Addr: ":9100", AdvertiseAddr: "http://localhost:9100",
 			DataDir: "./data", CoordinatorURL: "http://localhost:9000", HeartbeatInterval: 5 * time.Second,
+			ScrubInterval: time.Hour, ScrubDelay: 10 * time.Millisecond,
 		}},
 		{name: "all set", env: full, want: NodeConfig{
 			NodeID: "n1", Addr: "127.0.0.1:0", AdvertiseAddr: "http://10.0.0.1:9100",
 			DataDir: "/var/cairn", CoordinatorURL: "https://coord.example:9000", HeartbeatInterval: 250 * time.Millisecond,
+			ScrubInterval: 2 * time.Minute, ScrubDelay: 3 * time.Millisecond,
 		}},
 		{name: "empty value uses default", env: with("CAIRN_ADDR", ""), want: NodeConfig{
 			NodeID: "n1", Addr: ":9100", AdvertiseAddr: "http://10.0.0.1:9100",
 			DataDir: "/var/cairn", CoordinatorURL: "https://coord.example:9000", HeartbeatInterval: 250 * time.Millisecond,
+			ScrubInterval: 2 * time.Minute, ScrubDelay: 3 * time.Millisecond,
 		}},
 		{name: "bad interval", env: with("CAIRN_HEARTBEAT_INTERVAL", "soon"), bad: true},
 		{name: "zero interval", env: with("CAIRN_HEARTBEAT_INTERVAL", "0s"), bad: true},
 		{name: "negative interval", env: with("CAIRN_HEARTBEAT_INTERVAL", "-1s"), bad: true},
+		{name: "bad scrub interval", env: with("CAIRN_SCRUB_INTERVAL", "hourly"), bad: true},
+		{name: "zero scrub interval", env: with("CAIRN_SCRUB_INTERVAL", "0s"), bad: true},
+		{name: "bad scrub delay", env: with("CAIRN_SCRUB_DELAY", "10"), bad: true},
+		{name: "negative scrub delay", env: with("CAIRN_SCRUB_DELAY", "-10ms"), bad: true},
 		{name: "coordinator no scheme", env: with("CAIRN_COORDINATOR_URL", "localhost:9000"), bad: true},
 		{name: "coordinator bad scheme", env: with("CAIRN_COORDINATOR_URL", "ftp://x"), bad: true},
 		{name: "coordinator no host", env: with("CAIRN_COORDINATOR_URL", "http://"), bad: true},
@@ -81,6 +90,7 @@ func TestValidateEmptyFields(t *testing.T) {
 	base := NodeConfig{
 		NodeID: "n", Addr: ":1", AdvertiseAddr: "http://h:1", DataDir: "d",
 		CoordinatorURL: "http://c:1", HeartbeatInterval: time.Second,
+		ScrubInterval: time.Hour, ScrubDelay: time.Millisecond,
 	}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("base: %v", err)
