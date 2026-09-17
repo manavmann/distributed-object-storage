@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
-# End-to-end smoke test against a running Cairn (make up). Prints PASS or fails.
+# End-to-end smoke test against a running Cairn (make up), including a
+# failover: one replica holder is stopped mid-test. Prints PASS or fails.
 set -euo pipefail
 
 CAIRN_URL="${CAIRN_URL:-http://localhost:8080}"
+CAIRN_COMPOSE="${CAIRN_COMPOSE:-docker compose -f $(dirname "$0")/../deploy/docker-compose.yml}"
 BUCKET="smoke-$$"
 KEY="dir/blob-$$.bin"
 SIZE=$((8 * 1024 * 1024))
+RF=3
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+STOPPED_NODE=""
+cleanup() {
+  if [ -n "$STOPPED_NODE" ]; then
+    echo "restarting $STOPPED_NODE" >&2
+    $CAIRN_COMPOSE start "$STOPPED_NODE" >&2 || true
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
@@ -30,6 +41,30 @@ expect() {
   fi
 }
 
+# node_status NODE: prints NODE's status from /cluster/status, or nothing if
+# the node is unknown. Each node is one {...} object without nested braces.
+node_status() {
+  curl -sS "$CAIRN_URL/cluster/status" \
+    | grep -o '{[^{}]*}' \
+    | grep "\"node_id\":\"$1\"" \
+    | sed -n 's/.*"status":"\([A-Z]*\)".*/\1/p'
+}
+
+# wait_node_status NODE WANT: polls until NODE reports WANT or fails after 60s.
+wait_node_status() {
+  local node="$1" want="$2"
+  for _ in $(seq 1 60); do
+    if [ "$(node_status "$node")" = "$want" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "FAIL: $node did not become $want (is $(node_status "$node"))" >&2
+  curl -sS "$CAIRN_URL/cluster/status" >&2 || true
+  echo >&2
+  exit 1
+}
+
 echo "waiting for $CAIRN_URL/healthz"
 for _ in $(seq 1 60); do
   if curl -sf -o /dev/null "$CAIRN_URL/healthz"; then
@@ -49,6 +84,29 @@ expect 200 "$(request PUT "/v1/$BUCKET/$KEY" --data-binary "@$TMP/in")" "put obj
 echo "get and compare sha256"
 expect 200 "$(request GET "/v1/$BUCKET/$KEY")" "get object"
 [ "$(sha "$TMP/in")" = "$(sha "$TMP/body")" ] || { echo "FAIL: sha256 mismatch after GET" >&2; exit 1; }
+
+echo "locate: expect $RF replicas"
+expect 200 "$(request GET "/cluster/locate?bucket=$BUCKET&key=$KEY")" "locate object"
+REPLICAS="$(grep -o '"node_id"' "$TMP/body" | wc -l | tr -d ' ')"
+[ "$REPLICAS" = "$RF" ] || { echo "FAIL: locate shows $REPLICAS replicas, want $RF" >&2; cat "$TMP/body" >&2; echo >&2; exit 1; }
+HOLDER="$(grep -o '"node_id":"[^"]*"' "$TMP/body" | head -1 | sed 's/.*:"//;s/"$//')"
+[ -n "$HOLDER" ] || { echo "FAIL: locate has no node_id" >&2; cat "$TMP/body" >&2; echo >&2; exit 1; }
+
+echo "failover: stop holder $HOLDER"
+STOPPED_NODE="$HOLDER"
+$CAIRN_COMPOSE stop "$HOLDER"
+
+echo "get with $HOLDER stopped and compare sha256"
+expect 200 "$(request GET "/v1/$BUCKET/$KEY")" "get object during failover"
+[ "$(sha "$TMP/in")" = "$(sha "$TMP/body")" ] || { echo "FAIL: sha256 mismatch after GET during failover" >&2; exit 1; }
+
+echo "wait for $HOLDER to be DOWN"
+wait_node_status "$HOLDER" DOWN
+
+echo "start $HOLDER and wait for UP"
+$CAIRN_COMPOSE start "$HOLDER"
+STOPPED_NODE=""
+wait_node_status "$HOLDER" UP
 
 echo "head"
 expect 200 "$(request HEAD "/v1/$BUCKET/$KEY" --head)" "head object"
