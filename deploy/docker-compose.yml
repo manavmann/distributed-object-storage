@@ -1,0 +1,49 @@
+# Single-node Cairn: one coordinator, one storage node, RF=1.
+# make up / make smoke / make down (see Makefile).
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/coordinator"]
+    environment:
+      CAIRN_ADDR: ":8080"
+      CAIRN_DATA_DIR: /data
+      CAIRN_NODES: node1=node1:9000
+    ports:
+      - "8080:8080"
+    volumes:
+      - coordinator-data:/data
+    healthcheck:
+      test: ["CMD", "/coordinator", "-healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  node1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["/storagenode"]
+    environment:
+      CAIRN_NODE_ID: node1
+      CAIRN_ADDR: ":9000"
+      CAIRN_ADVERTISE_ADDR: http://node1:9000
+      CAIRN_COORDINATOR_URL: http://coordinator:8080
+      CAIRN_DATA_DIR: /data
+    volumes:
+      - node1-data:/data
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/storagenode", "-healthcheck"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+volumes:
+  coordinator-data:
+  node1-data:

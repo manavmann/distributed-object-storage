@@ -1,5 +1,6 @@
 GO ?= go
 BIN := bin
+COMPOSE := docker compose -f deploy/docker-compose.yml
 
 .PHONY: build test lint up down logs smoke demo bench
 
@@ -15,16 +16,16 @@ lint:
 	$(GO) vet ./...
 
 up:
-	@echo "up: not implemented yet"
+	$(COMPOSE) up -d --build --wait
 
 down:
-	@echo "down: not implemented yet"
+	$(COMPOSE) down -v
 
 logs:
-	@echo "logs: not implemented yet"
+	$(COMPOSE) logs -f
 
 smoke:
-	@echo "smoke: not implemented yet"
+	bash scripts/smoke.sh
 
 demo:
 	@echo "demo: not implemented yet"

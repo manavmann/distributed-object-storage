@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/config"
+	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/storage"
 )
 
@@ -23,11 +25,20 @@ const (
 )
 
 func main() {
+	healthcheck := flag.Bool("healthcheck", false, "probe the running node's /healthz on CAIRN_ADDR and exit 0 or 1")
+	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	cfg, err := config.LoadNode(os.Getenv)
 	if err != nil {
 		log.Error("node.config", "err", err)
 		os.Exit(2)
+	}
+	if *healthcheck {
+		if err := httpx.Healthcheck(cfg.Addr); err != nil {
+			log.Error("node.healthcheck", "err", err)
+			os.Exit(1)
+		}
+		return
 	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
