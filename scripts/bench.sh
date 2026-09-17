@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmarks a running Cairn (make up): PUT and GET at 4KiB/1MiB/32MiB with
+# Benchmarks a running Shardwell (make up): PUT and GET at 4KiB/1MiB/32MiB with
 # concurrency 1/8/32, BENCH_RUNS runs of BENCH_DURATION each, median per
 # cell, printed as a Markdown table. Then PUT 1MiB c=8 under the default
 # RF=3/W=2 against RF=1/W=1 by recreating the coordinator with that env.
@@ -98,7 +98,7 @@ row() {
 [ -x "$BENCH" ] || { echo "FAIL: $BENCH not built (make build)" >&2; exit 1; }
 wait_healthy
 
-echo "## Cairn bench: $BENCH_RUNS × $BENCH_DURATION per cell, median (warmup $BENCH_WARMUP)"
+echo "## Shardwell bench: $BENCH_RUNS × $BENCH_DURATION per cell, median (warmup $BENCH_WARMUP)"
 echo
 echo "| op / size / c | ops/s | MiB/s | p50 ms | p99 ms | errors |"
 echo "|---|---:|---:|---:|---:|---:|"

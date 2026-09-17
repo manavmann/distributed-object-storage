@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test against a running Cairn (make up): a failover (one
+# End-to-end smoke test against a running Shardwell (make up): a failover (one
 # replica holder is stopped mid-test) and a corruption (one copy is flipped on
 # disk, read around, dropped and repaired). Prints PASS or fails.
 set -euo pipefail

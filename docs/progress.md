@@ -1,8 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C28. C28: node scrubber (Store.Scrub via Read, one blob per CAIRN_SCRUB_DELAY, pass per CAIRN_SCRUB_INTERVAL); failures ride the heartbeat as scrub_failures ids, coordinator drops the replica rows, /cluster/status counts them per node.
-Next: C29 — (next roadmap item)
+Done: C1–C29. C29: CAIRN_CLUSTER_SECRET — httpx.BearerAuth on /internal/heartbeat and node /blobs/*, httpx.SetBearer on heartbeats and every nodeclient request; unset = off.
+Next: C30 — (next roadmap item)
 ## Hours ledger
 | Item | Est | Actual | Notes |
 |---|---|---|---|
@@ -34,5 +34,6 @@ Next: C29 — (next roadmap item)
 | C26 | | | `make demo -- -y` PASS in 60s from `make down && make up`; make lint test clean; after `--` make turns `-y` into a goal, so the Makefile has a no-op `-y` target and forwards `$(filter -y,$(MAKECMDGOALS))`; the corrupt-copy dip in locate lasts ~350ms (drop + re-repair onto the same node within one tick) so the demo detects it via cairn_integrity_failures_total and the node's quarantine/ listing, not a locate poll — smoke.sh's RF−1 locate assertion is the same race and only passes by tick timing |
 | C27 | | | cmd/cairnctl -race -count=5 clean; verified against `make up`: 8 MiB put/get byte-identical, rm → 404 exit 1; a zero-byte put must set http.NoBody or net/http sends chunked and the API 411s; bucket names must be ≥3 chars so the test uses "ctl" not "b"; key segments are PathEscaped so "dir/k 1" round-trips |
 | C28 | | | storage+integration -race clean, new tests -count=5 clean; scrub failures are drained only after a 2xx (acked callback on RunHeartbeat) and capped at 64 ids per heartbeat so the 4 KiB heartbeat body limit holds, the rest wait a beat; the coordinator's per-node scrub_failures count is in-memory only and resets on restart; "decrement the blob counter" is BlobCount()/cairn_node_blobs, which re-read blobs/ on each heartbeat so quarantine decrements them without a separate counter |
+| C29 | | | httpx+storage+api+integration -race clean, new tests -count=3 clean; the check lives inside the mux (per route, not a global wrapper) so /healthz and /metrics stay open for container healthchecks and Prometheus and 401s are counted under the route pattern; a wrong secret on a node surfaces to the coordinator as nodeclient.ErrUnavailable (401 → default branch of errorFrom), so a misconfigured node looks DOWN-ish in logs rather than raising a distinct error; deploy/docker-compose.yml is unchanged (feature off) |
 
 

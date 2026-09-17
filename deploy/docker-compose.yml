@@ -1,4 +1,4 @@
-# Four-node Cairn: one coordinator, node1..node4, RF=3, W=2 (overridable
+# Four-node Shardwell: one coordinator, node1..node4, RF=3, W=2 (overridable
 # via CAIRN_REPLICATION_FACTOR / CAIRN_WRITE_QUORUM for scripts/bench.sh).
 # Each node repeats CAIRN_HEARTBEAT_INTERVAL because a service environment
 # block replaces the anchor's, it does not merge into it.

@@ -1,6 +1,6 @@
 # Failure model
 
-What Cairn does when things break, one failure class per section. Each
+What Shardwell does when things break, one failure class per section. Each
 section names the detection point, what every layer does about it, what is
 never done, how to reproduce it, and the outcome when the failure exhausts
 every copy.

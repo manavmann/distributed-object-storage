@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Walks a running Cairn (make up) through its failure story, printing each
+# Walks a running Shardwell (make up) through its failure story, printing each
 # command before running it and pausing between steps: status, bucket, an
 # 8 MiB PUT, locate, GET, stop a holder, GET again, repair back to RF UP
 # copies, corrupt a copy on disk, GET again, repair again, restart the node,

@@ -1,6 +1,6 @@
 # Architecture
 
-Cairn is one coordinator and N storage nodes. The coordinator owns all
+Shardwell is one coordinator and N storage nodes. The coordinator owns all
 metadata and every decision; nodes are checksummed blob stores that know
 nothing about buckets, keys or each other. The coordinator is an explicit
 single point of failure: there is no leader election and no second

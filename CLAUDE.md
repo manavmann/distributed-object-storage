@@ -1,4 +1,4 @@
-# Cairn — working notes for Claude Code
+# Shardwell — working notes for Claude Code
 
 ## What this is
 Distributed object storage in Go. One coordinator (HTTP API, SQLite metadata, placement,

@@ -1,4 +1,4 @@
-# Cairn
+# Shardwell
 
 Distributed object storage in Go: one coordinator, N storage nodes, replicated checksummed blobs.
 
