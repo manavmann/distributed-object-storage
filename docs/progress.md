@@ -2,7 +2,8 @@
 
 ## State
 Done: C1–C24. C24: cmd/bench load generator + scripts/bench.sh (PUT/GET × 3 sizes × 3 concurrencies, 3-run medians, RF=3/W=2 vs RF=1/W=1 by recreating the coordinator) wired to `make bench`; compose RF/W overridable via env.
-Next: C25 — (next roadmap item)
+C25: was jsut revisions and bug fixes
+Next: C26 — (next roadmap item)
 
 ## Hours ledger
 | Item | Est | Actual | Notes |
@@ -31,5 +32,6 @@ Next: C25 — (next roadmap item)
 | C22 | | | api+integration+cmd -race clean, new tests -count=5 clean; most of the item already existed (ReadHeaderTimeout, Shutdown→Stop→Close order, spool sweep, 413-before-read, short body→400) so the real gaps were IdleTimeout, node 30s drain, and the silent return on a cancelled slot wait; "requests refused during shutdown" must use a fresh connection per request — an idle keep-alive conn can still be served for ~1ms after the listener closes; a short body cannot be sent through net/http's client (it refuses ContentLength≠body), so that test writes raw HTTP over a TCPConn and half-closes; env var stays CAIRN_MAX_UPLOADS (item says MAX_CONCURRENT_UPLOADS), driven as Opts.MaxUploads in the harness |
 | C23 | | | Checks
 | C24 | | | cmd/bench -race -count=5 clean; `make bench` printed both tables against `make up`; the compose x-node anchor's CAIRN_HEARTBEAT_INTERVAL never reached the nodes (a service `environment:` replaces the anchor's map, it doesn't merge) so `make up` flapped DOWN/UP every 5s at idle and every bench cell hit InsufficientReplicas — fixed by repeating the interval per node; in-flight requests finish at the deadline rather than being cancelled, so the measured window is ≥ duration, never exactly it; heartbeats still starve behind PUT commits on the single DB conn under put 32MiB c=32 (10 errors in that cell); GET pre-population of 64 × 32MiB dominates the GET rows' wall time |
+| C25 | | | Revisons and fixes
 
 
