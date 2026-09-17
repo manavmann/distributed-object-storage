@@ -328,8 +328,9 @@ func TestNodeDownOnGet(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable || errCode(t, body) != "NoHealthyReplica" {
 		t.Fatalf("GET with node down = %d %s", resp.StatusCode, body)
 	}
-	if resp, _ := do(t, c, http.MethodHead, "/v1/bkt/k", nil); resp.StatusCode != http.StatusOK {
-		t.Fatalf("HEAD with node down = %d, want 200 from metadata", resp.StatusCode)
+	// HEAD goes through the same replica read as GET, so it fails the same way.
+	if resp, _ := do(t, c, http.MethodHead, "/v1/bkt/k", nil); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("HEAD with node down = %d, want 503", resp.StatusCode)
 	}
 }
 

@@ -44,13 +44,15 @@ type PutResult struct {
 	ETag     string   `json:"-"`
 }
 
-// Object is what GET and HEAD report. Body is nil for HEAD.
+// Object is what GET and HEAD report. Body is nil for HEAD; Replica is the
+// node that served it (X-Cairn-Replica).
 type Object struct {
 	Body         []byte
 	Size         int64
 	ETag         string
 	ContentType  string
 	LastModified time.Time
+	Replica      string
 }
 
 // ListEntry is one object in a Listing.
@@ -194,6 +196,7 @@ func objectFrom(resp *http.Response) (Object, error) {
 	}
 	return Object{
 		Size: size, ETag: resp.Header.Get("ETag"), ContentType: resp.Header.Get("Content-Type"), LastModified: mod,
+		Replica: resp.Header.Get("X-Cairn-Replica"),
 	}, nil
 }
 
@@ -242,4 +245,35 @@ func (cl *Client) Status() (Status, error) {
 		return Status{}, fmt.Errorf("status %q: %w", b, err)
 	}
 	return st, nil
+}
+
+// LocateReplica is one holder in a Location.
+type LocateReplica struct {
+	NodeID    string `json:"node_id"`
+	Addr      string `json:"addr"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+}
+
+// Location is the body of GET /cluster/locate.
+type Location struct {
+	BlobID    string          `json:"blob_id"`
+	Size      int64           `json:"size"`
+	SHA256    string          `json:"sha256"`
+	Replicas  []LocateReplica `json:"replicas"`
+	Placement []string        `json:"placement"`
+}
+
+// Locate asks the coordinator where bucket/key lives.
+func (cl *Client) Locate(bucket, key string) (Location, error) {
+	q := url.Values{"bucket": {bucket}, "key": {key}}
+	_, b, err := cl.call(http.MethodGet, "/cluster/locate?"+q.Encode(), nil, http.StatusOK)
+	if err != nil {
+		return Location{}, err
+	}
+	var loc Location
+	if err := json.Unmarshal(b, &loc); err != nil {
+		return Location{}, fmt.Errorf("locate response %q: %w", b, err)
+	}
+	return loc, nil
 }

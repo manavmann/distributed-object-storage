@@ -140,9 +140,8 @@ func TestKillAndRestartNode(t *testing.T) {
 	if !c.HasBlob(victim, blobID) {
 		t.Fatal("blob gone from disk after Kill")
 	}
-	var apiErr *testcluster.APIError
-	if _, err := cl.Get("bkt", "k"); !errors.As(err, &apiErr) || apiErr.Code != "NoHealthyReplica" {
-		t.Fatalf("get with holder down = %v", err)
+	if obj, err := cl.Get("bkt", "k"); err != nil || string(obj.Body) != "survives" || obj.Replica == id {
+		t.Fatalf("get with holder down = %+v, %v; want the other holder to serve it", obj, err)
 	}
 
 	c.Restart(victim)

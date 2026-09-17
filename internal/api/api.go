@@ -24,6 +24,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
+	"github.com/manavmann/distributed-object-storage/internal/placement"
 	"github.com/manavmann/distributed-object-storage/internal/replication"
 )
 
@@ -52,6 +53,7 @@ type Server struct {
 	nodes       *cluster.Registry
 	client      *nodeclient.Client
 	writer      *replication.Writer
+	reader      *replication.Reader
 	spoolDir    string
 	maxSize     int64
 	nodeTimeout time.Duration
@@ -76,12 +78,13 @@ type putResponse struct {
 //	GET    /v1/{bucket}           200 {name,created_at,object_count} | 400 | 404
 //	GET    /v1/{bucket}/          200 listing; ?prefix=&limit=&start_after= | 400 | 404
 //	PUT    /v1/{bucket}/{key...}  200 stored  | 400 | 404 no bucket | 411 | 413 | 503 InsufficientReplicas
-//	GET    /v1/{bucket}/{key...}  200 payload | 400 | 404 | 503 NoHealthyReplica
-//	HEAD   /v1/{bucket}/{key...}  200 headers from metadata | 400 | 404
+//	GET    /v1/{bucket}/{key...}  200 payload, X-Cairn-Replica | 400 | 404 | 503 NoHealthyReplica
+//	HEAD   /v1/{bucket}/{key...}  200 same headers, no body | 400 | 404 | 503 NoHealthyReplica
 //	DELETE /v1/{bucket}/{key...}  204 | 400 | 404 no bucket
 //	GET    /healthz               200
 //	POST   /internal/heartbeat    204 | 400 InvalidHeartbeat
 //	GET    /cluster/status        200 {nodes:[...],under_replicated}
+//	GET    /cluster/locate        200 {blob_id,size,sha256,replicas,placement}; ?bucket=&key= | 400 | 404
 //
 // Every response carries X-Request-ID and every request is logged.
 func NewHandler(cfg Config) http.Handler {
@@ -91,6 +94,7 @@ func NewHandler(cfg Config) http.Handler {
 		nodes:       cfg.Nodes,
 		client:      client,
 		writer:      &replication.Writer{N: cfg.RF, W: cfg.W, Client: client, Registry: cfg.Nodes, Timeout: cfg.NodeTimeout},
+		reader:      &replication.Reader{Meta: cfg.Meta, Client: client, Log: cfg.Log},
 		spoolDir:    cfg.SpoolDir,
 		maxSize:     cfg.MaxObjectSize,
 		nodeTimeout: cfg.NodeTimeout,
@@ -108,6 +112,7 @@ func NewHandler(cfg Config) http.Handler {
 	})
 	mux.HandleFunc("POST /internal/heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("GET /cluster/status", s.handleClusterStatus)
+	mux.HandleFunc("GET /cluster/locate", s.handleLocate)
 	return httpx.RequestID(httpx.Logging(cfg.Log, mux))
 }
 
@@ -148,6 +153,69 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		resp.Nodes = append(resp.Nodes, statusNode{
 			NodeID: n.ID, Addr: n.Addr, Status: n.Status, FreeBytes: n.FreeBytes, BlobCount: n.BlobCount,
 			LastSeen: n.LastSeen.UTC(), StatusChangedAt: n.StatusChangedAt.UTC(),
+		})
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
+// locateReplica is one holder in a locate response.
+type locateReplica struct {
+	NodeID    string `json:"node_id"`
+	Addr      string `json:"addr"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+}
+
+// locateResponse is the body of GET /cluster/locate. Replicas are the
+// nodes metadata says hold the blob; Placement is every known node ranked
+// for the key, which is where a fresh write would go.
+type locateResponse struct {
+	BlobID    string          `json:"blob_id"`
+	Size      int64           `json:"size"`
+	SHA256    string          `json:"sha256"`
+	Replicas  []locateReplica `json:"replicas"`
+	Placement []string        `json:"placement"`
+}
+
+func (s *Server) handleLocate(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	bucket, key := q.Get("bucket"), q.Get("key")
+	if bucket == "" || key == "" {
+		s.writeError(w, r, fmt.Errorf("%w: bucket and key are required", ErrInvalidArgument))
+		return
+	}
+	if err := validateBucket(bucket); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := validateKey(key); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	obj, err := s.meta.GetObject(r.Context(), bucket, key)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	reps, err := s.meta.Replicas(r.Context(), obj.BlobID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	all := s.nodes.All()
+	ids := make([]string, 0, len(all))
+	for _, n := range all {
+		ids = append(ids, n.ID)
+	}
+	resp := locateResponse{
+		BlobID: obj.BlobID, Size: obj.Size, SHA256: obj.SHA256,
+		Replicas:  make([]locateReplica, 0, len(reps)),
+		Placement: placement.Rank(key, ids),
+	}
+	for _, rep := range reps {
+		resp.Replicas = append(resp.Replicas, locateReplica{
+			NodeID: rep.NodeID, Addr: rep.Addr, Status: rep.Status,
+			CreatedAt: time.UnixMilli(rep.CreatedAt).UTC().Format(time.RFC3339Nano),
 		})
 	}
 	httpx.WriteJSON(w, http.StatusOK, resp)
@@ -366,36 +434,24 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if r.Method == http.MethodHead {
-		setObjectHeaders(w, obj)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	replicas, err := s.meta.Replicas(r.Context(), obj.BlobID)
+	nodeCtx, cancel := context.WithTimeout(r.Context(), s.nodeTimeout)
+	defer cancel()
+	blob, from, err := s.reader.Open(nodeCtx, obj)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	if len(replicas) == 0 {
-		s.writeError(w, r, fmt.Errorf("%w: blob %s has no replicas", ErrNoHealthyReplica, obj.BlobID))
-		return
-	}
-	rep := replicas[0]
-	nodeCtx, cancel := context.WithTimeout(r.Context(), s.nodeTimeout)
-	defer cancel()
-	blob, err := s.client.Get(nodeCtx, rep.Addr, obj.BlobID)
-	if err != nil {
-		s.writeError(w, r, fmt.Errorf("%w: node %s: %w", ErrNoHealthyReplica, rep.NodeID, err))
-		return
-	}
 	defer blob.Close()
-	if blob.Length != obj.Size || blob.SHA256 != obj.SHA256 {
-		s.writeError(w, r, fmt.Errorf("%w: node %s holds %d bytes %s, metadata says %d bytes %s",
-			ErrNoHealthyReplica, rep.NodeID, blob.Length, blob.SHA256, obj.Size, obj.SHA256))
+	// The reader may have switched to a newer version of the object that
+	// landed mid-request; the length and digest of what is actually being
+	// served come from the verified blob.
+	obj.Size, obj.SHA256 = blob.Length, blob.SHA256
+	setObjectHeaders(w, obj)
+	w.Header().Set("X-Cairn-Replica", from)
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
 		return
 	}
-	setObjectHeaders(w, obj)
-	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, blob); err != nil {
 		s.log.Warn("api.stream_aborted", "request_id", httpx.RequestIDFrom(r.Context()), "err", err)
 	}

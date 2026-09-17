@@ -14,6 +14,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/replication"
 )
 
 func TestStatusFor(t *testing.T) {
@@ -30,7 +31,7 @@ func TestStatusFor(t *testing.T) {
 		{ErrBodyRead, 400, "IncompleteBody"},
 		{cluster.ErrInvalidHeartbeat, 400, "InvalidHeartbeat"},
 		{ErrInsufficientReplicas, 503, "InsufficientReplicas"},
-		{ErrNoHealthyReplica, 503, "NoHealthyReplica"},
+		{replication.ErrNoHealthyReplica, 503, "NoHealthyReplica"},
 		{meta.ErrNoSuchBucket, 404, "NoSuchBucket"},
 		{meta.ErrNoSuchKey, 404, "NoSuchKey"},
 		{meta.ErrBucketExists, 409, "BucketAlreadyExists"},
@@ -65,7 +66,7 @@ func TestErrorEnvelope(t *testing.T) {
 		{ErrTooLarge, 413, "EntityTooLarge"},
 		{errors.New("boom"), 500, "InternalError"},
 		{ErrInsufficientReplicas, 503, "InsufficientReplicas"},
-		{ErrNoHealthyReplica, 503, "NoHealthyReplica"},
+		{replication.ErrNoHealthyReplica, 503, "NoHealthyReplica"},
 	} {
 		h := httpx.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, fmt.Errorf("wrapped: %w", tc.err))

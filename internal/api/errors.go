@@ -8,6 +8,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/replication"
 )
 
 var (
@@ -26,8 +27,6 @@ var (
 	// ErrInsufficientReplicas means a PUT could not be stored on enough
 	// nodes to be committed.
 	ErrInsufficientReplicas = errors.New("api: insufficient replicas")
-	// ErrNoHealthyReplica means no node could serve the object's blob.
-	ErrNoHealthyReplica = errors.New("api: no healthy replica")
 )
 
 // statusFor is the single place an error becomes an HTTP status and code.
@@ -58,7 +57,7 @@ func statusFor(err error) (int, string) {
 		return http.StatusBadRequest, "IncompleteBody"
 	case errors.Is(err, ErrInsufficientReplicas):
 		return http.StatusServiceUnavailable, "InsufficientReplicas"
-	case errors.Is(err, ErrNoHealthyReplica):
+	case errors.Is(err, replication.ErrNoHealthyReplica):
 		return http.StatusServiceUnavailable, "NoHealthyReplica"
 	case errors.Is(err, meta.ErrNoSuchBucket):
 		return http.StatusNotFound, "NoSuchBucket"

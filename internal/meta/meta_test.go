@@ -118,7 +118,7 @@ func TestCommitOverwriteQueuesOldReplicas(t *testing.T) {
 		t.Fatalf("GetObject = %+v, %v", got, err)
 	}
 	reps, err := db.Replicas(ctx, "blob-1")
-	if err != nil || len(reps) != 2 || reps[0].NodeID != "n1" || reps[0].Addr != "http://n1" || reps[0].Status != "UP" {
+	if err != nil || len(reps) != 2 || reps[0].NodeID != "n1" || reps[0].Addr != "http://n1" || reps[0].Status != "UP" || reps[0].CreatedAt == 0 {
 		t.Fatalf("Replicas(blob-1) = %+v, %v", reps, err)
 	}
 
@@ -397,5 +397,30 @@ func TestForeignKeysEnforced(t *testing.T) {
 	}
 	if _, err := db.db.Exec(`INSERT INTO objects (bucket, key, blob_id, size, sha256, created_at) VALUES ('nope', 'k', 'blob-3', 1, 'x', 0)`); err == nil {
 		t.Fatal("raw object insert into unknown bucket succeeded, want FK error")
+	}
+}
+
+func TestDropReplica(t *testing.T) {
+	db, _ := openTemp(t)
+	ctx := context.Background()
+	mustCreateBucket(t, db, "b")
+	mustUpsertNodes(t, db, "n1", "n2")
+	mustCommit(t, db, "b", "k", "blob-1", "n1", "n2")
+
+	if err := db.DropReplica(ctx, "blob-1", "n1"); err != nil {
+		t.Fatalf("DropReplica: %v", err)
+	}
+	reps, err := db.Replicas(ctx, "blob-1")
+	if err != nil || len(reps) != 1 || reps[0].NodeID != "n2" {
+		t.Fatalf("Replicas after drop = %+v, %v; want only n2", reps, err)
+	}
+	if err := db.DropReplica(ctx, "blob-1", "n1"); err != nil {
+		t.Fatalf("second DropReplica: %v", err)
+	}
+	if _, err := db.GetObject(ctx, "b", "k"); err != nil {
+		t.Fatalf("object gone after dropping a replica: %v", err)
+	}
+	if n, err := db.CountPending(ctx); err != nil || n != 0 {
+		t.Fatalf("pending deletes = %d, %v; want 0 (quarantined copy needs no GC)", n, err)
 	}
 }

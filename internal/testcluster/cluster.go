@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,6 +308,22 @@ func (c *Cluster) HasBlob(i int, id string) bool {
 		return false
 	}
 	c.t.Fatalf("HasBlob(%d, %s): %v", i, id, err)
+	return false
+}
+
+// Quarantined reports whether node i has moved blob id into quarantine/,
+// under its own name or a numbered suffix.
+func (c *Cluster) Quarantined(i int, id string) bool {
+	c.t.Helper()
+	entries, err := os.ReadDir(filepath.Join(c.nodes[i].dir, "quarantine"))
+	if err != nil {
+		c.t.Fatalf("Quarantined(%d, %s): %v", i, id, err)
+	}
+	for _, e := range entries {
+		if e.Name() == id || strings.HasPrefix(e.Name(), id+".") {
+			return true
+		}
+	}
 	return false
 }
 

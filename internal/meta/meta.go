@@ -56,11 +56,13 @@ type Object struct {
 }
 
 // Replica is a replicas row joined with the node that holds the copy.
+// CreatedAt is when the node acknowledged the write.
 type Replica struct {
-	BlobID string
-	NodeID string
-	Addr   string
-	Status string
+	BlobID    string
+	NodeID    string
+	Addr      string
+	Status    string
+	CreatedAt int64
 }
 
 // Node is a row of nodes. Status is owned by the health monitor and only
@@ -388,7 +390,7 @@ func (d *DB) ListObjects(ctx context.Context, bucket, prefix, startAfter string,
 // Replicas returns the nodes that hold blobID, ordered by node id.
 func (d *DB) Replicas(ctx context.Context, blobID string) ([]Replica, error) {
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT r.blob_id, r.node_id, n.addr, n.status
+		SELECT r.blob_id, r.node_id, n.addr, n.status, r.created_at
 		FROM replicas r JOIN nodes n ON n.node_id = r.node_id
 		WHERE r.blob_id = ? ORDER BY r.node_id`, blobID)
 	if err != nil {
@@ -398,7 +400,7 @@ func (d *DB) Replicas(ctx context.Context, blobID string) ([]Replica, error) {
 	var out []Replica
 	for rows.Next() {
 		var r Replica
-		if err := rows.Scan(&r.BlobID, &r.NodeID, &r.Addr, &r.Status); err != nil {
+		if err := rows.Scan(&r.BlobID, &r.NodeID, &r.Addr, &r.Status, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("meta: replicas: %w", err)
 		}
 		out = append(out, r)
@@ -407,6 +409,16 @@ func (d *DB) Replicas(ctx context.Context, blobID string) ([]Replica, error) {
 		return nil, fmt.Errorf("meta: replicas: %w", err)
 	}
 	return out, nil
+}
+
+// DropReplica forgets that nodeID holds blobID, because the node reported
+// its copy corrupt and quarantined it. Dropping a row that does not exist
+// is not an error.
+func (d *DB) DropReplica(ctx context.Context, blobID, nodeID string) error {
+	if _, err := d.db.ExecContext(ctx, `DELETE FROM replicas WHERE blob_id = ? AND node_id = ?`, blobID, nodeID); err != nil {
+		return fmt.Errorf("meta: drop replica %s on %s: %w", blobID, nodeID, err)
+	}
+	return nil
 }
 
 // UpsertNode records a heartbeat: it inserts n, or updates the address,
