@@ -1,6 +1,7 @@
 // Package coordinator wires the coordinator's parts together: metadata
-// store, node registry, health monitor and the HTTP API. It owns their
-// lifetimes.
+// store, node registry, health monitor and the HTTP API. It owns the
+// lifetimes of the parts it creates; the metadata store is handed in and
+// stays with its owner.
 package coordinator
 
 import (
@@ -21,22 +22,25 @@ import (
 // monitorTick is how often the health monitor looks for silent nodes.
 const monitorTick = time.Second
 
-// Coordinator is a running control plane minus its listener.
+// Deps are the parts the coordinator uses but does not own.
+type Deps struct {
+	Meta *meta.DB
+	Log  *slog.Logger
+}
+
+// Coordinator is a control plane minus its listener.
 type Coordinator struct {
-	meta        *meta.DB
-	handler     http.Handler
+	nodes   *cluster.Registry
+	handler http.Handler
+
 	stopMonitor context.CancelFunc
 	monitorDone chan struct{}
 }
 
-// New opens DATA_DIR/meta.db, prepares DATA_DIR/spool, loads the node
-// registry from metadata, starts the health monitor and builds the API
-// handler. Spool files left by a previous run are removed: their uploads
-// were never committed.
-func New(cfg config.CoordinatorConfig, log *slog.Logger) (*Coordinator, error) {
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("coordinator: data dir: %w", err)
-	}
+// New prepares DATA_DIR/spool, loads the node registry from metadata and
+// builds the API handler. Spool files left by a previous run are removed:
+// their uploads were never committed. Nothing runs until Start.
+func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 	spoolDir := filepath.Join(cfg.DataDir, "spool")
 	if err := os.RemoveAll(spoolDir); err != nil {
 		return nil, fmt.Errorf("coordinator: clear spool: %w", err)
@@ -44,35 +48,22 @@ func New(cfg config.CoordinatorConfig, log *slog.Logger) (*Coordinator, error) {
 	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
 		return nil, fmt.Errorf("coordinator: spool dir: %w", err)
 	}
-	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	nodes, err := cluster.Load(context.Background(), deps.Meta, cfg.HeartbeatTimeout, time.Now, deps.Log)
 	if err != nil {
 		return nil, err
 	}
-	nodes, err := cluster.Load(context.Background(), db, cfg.HeartbeatTimeout, time.Now, log)
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	ctx, stop := context.WithCancel(context.Background())
-	c := &Coordinator{
-		meta: db,
+	return &Coordinator{
+		nodes: nodes,
 		handler: api.NewHandler(api.Config{
-			Meta:          db,
+			Meta:          deps.Meta,
 			Nodes:         nodes,
 			SpoolDir:      spoolDir,
 			MaxObjectSize: cfg.MaxObjectSize,
 			MaxUploads:    cfg.MaxUploads,
 			NodeTimeout:   cfg.NodeTimeout,
-			Log:           log,
+			Log:           deps.Log,
 		}),
-		stopMonitor: stop,
-		monitorDone: make(chan struct{}),
-	}
-	go func() {
-		defer close(c.monitorDone)
-		nodes.Monitor(ctx, monitorTick)
-	}()
-	return c, nil
+	}, nil
 }
 
 // Handler is the public HTTP API.
@@ -80,9 +71,22 @@ func (c *Coordinator) Handler() http.Handler {
 	return c.handler
 }
 
-// Close stops the health monitor and releases the metadata store.
-func (c *Coordinator) Close() error {
+// Start runs the health monitor until ctx is done or Stop is called.
+func (c *Coordinator) Start(ctx context.Context) {
+	ctx, c.stopMonitor = context.WithCancel(ctx)
+	c.monitorDone = make(chan struct{})
+	go func() {
+		defer close(c.monitorDone)
+		c.nodes.Monitor(ctx, monitorTick)
+	}()
+}
+
+// Stop halts the health monitor and returns once it has exited, so nothing
+// touches the metadata store afterwards. It is a no-op before Start.
+func (c *Coordinator) Stop() {
+	if c.stopMonitor == nil {
+		return
+	}
 	c.stopMonitor()
 	<-c.monitorDone
-	return c.meta.Close()
 }

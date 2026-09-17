@@ -14,8 +14,22 @@ import (
 	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/config"
+	"github.com/manavmann/distributed-object-storage/internal/meta"
 	"github.com/manavmann/distributed-object-storage/internal/storage"
 )
+
+func openMeta(t *testing.T, dataDir string) *meta.DB {
+	t.Helper()
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := meta.Open(filepath.Join(dataDir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
 
 func TestNewWiresNodeAndServes(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -39,11 +53,13 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 		Addr: ":0", DataDir: dataDir,
 		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
 	}
-	c, err := New(cfg, log)
+	db := openMeta(t, dataDir)
+	c, err := New(cfg, Deps{Meta: db, Log: log})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { c.Close() })
+	c.Start(context.Background())
+	t.Cleanup(c.Stop)
 
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("stale spool file survived New: %v", err)
@@ -60,7 +76,7 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("heartbeat = %d", resp.StatusCode)
 	}
-	nodes, err := c.meta.ListNodes(context.Background())
+	nodes, err := db.ListNodes(context.Background())
 	if err != nil || len(nodes) != 1 || nodes[0].ID != "n1" || nodes[0].Addr != node.URL {
 		t.Fatalf("ListNodes = %+v, %v", nodes, err)
 	}
@@ -92,31 +108,33 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || string(body) != "hello" {
 		t.Fatalf("GET = %d %q", resp.StatusCode, body)
 	}
-	if _, err := c.meta.GetObject(context.Background(), "bkt", "k"); err != nil {
+	if _, err := db.GetObject(context.Background(), "bkt", "k"); err != nil {
 		t.Fatalf("object not in metadata: %v", err)
 	}
-	if _, err := c.meta.GetBucket(context.Background(), "bkt"); err != nil {
+	if _, err := db.GetBucket(context.Background(), "bkt"); err != nil {
 		t.Fatalf("bucket not in metadata: %v", err)
 	}
 }
 
-// TestCloseStopsMonitor checks that Close returns once the monitor
-// goroutine has exited, so nothing touches the DB after it is closed.
-func TestCloseStopsMonitor(t *testing.T) {
+// TestStopWaitsForMonitor checks that Stop returns once the monitor
+// goroutine has exited, so nothing touches the DB after its owner closes
+// it, and that Stop before Start is harmless.
+func TestStopWaitsForMonitor(t *testing.T) {
+	dataDir := t.TempDir()
 	cfg := config.CoordinatorConfig{
-		Addr: ":0", DataDir: t.TempDir(),
+		Addr: ":0", DataDir: dataDir,
 		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
 	}
-	c, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c, err := New(cfg, Deps{Meta: openMeta(t, dataDir), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	c.Stop()
+	c.Start(context.Background())
+	c.Stop()
 	select {
 	case <-c.monitorDone:
 	default:
-		t.Fatal("monitor still running after Close")
+		t.Fatal("monitor still running after Stop")
 	}
 }

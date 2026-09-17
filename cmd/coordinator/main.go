@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/config"
 	"github.com/manavmann/distributed-object-storage/internal/coordinator"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
+	"github.com/manavmann/distributed-object-storage/internal/meta"
 )
 
 const (
@@ -56,11 +58,20 @@ func main() {
 // serve runs the coordinator on ln until ctx is done, then drains in-flight
 // requests and closes the metadata store.
 func serve(ctx context.Context, cfg config.CoordinatorConfig, ln net.Listener, log *slog.Logger) error {
-	c, err := coordinator.New(cfg, log)
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		return fmt.Errorf("data dir: %w", err)
+	}
+	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer db.Close()
+	c, err := coordinator.New(cfg, coordinator.Deps{Meta: db, Log: log})
+	if err != nil {
+		return err
+	}
+	c.Start(ctx)
+	defer c.Stop()
 	srv := &http.Server{
 		Handler:           c.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

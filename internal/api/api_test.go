@@ -1,4 +1,4 @@
-package api
+package api_test
 
 import (
 	"bytes"
@@ -12,11 +12,11 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/manavmann/distributed-object-storage/internal/api"
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
@@ -24,108 +24,29 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/testcluster"
 )
 
-const testMaxSize = 4 << 20
-
-// env is one coordinator API in front of one real storage node.
-type env struct {
-	api      *httptest.Server
-	handler  http.Handler
-	meta     *meta.DB
-	store    *storage.Store
-	node     *httptest.Server
-	spoolDir string
-}
-
-// newEnv starts a storage node on httptest, opens a metadata store in a
-// temp dir, registers the node and serves the API handler on httptest.
-func newEnv(t *testing.T) *env {
+// newCluster is one coordinator in front of one real storage node.
+func newCluster(t *testing.T) *testcluster.Cluster {
 	t.Helper()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store, err := storage.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	node := httptest.NewServer(storage.NewHandler(store, log))
-	t.Cleanup(node.Close)
-
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	nodes, err := cluster.Load(context.Background(), db, time.Minute, time.Now, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := nodes.Heartbeat(context.Background(), cluster.Heartbeat{NodeID: "n1", Addr: node.URL}); err != nil {
-		t.Fatal(err)
-	}
-	spoolDir := t.TempDir()
-	handler := NewHandler(Config{
-		Meta:          db,
-		Nodes:         nodes,
-		SpoolDir:      spoolDir,
-		MaxObjectSize: testMaxSize,
-		MaxUploads:    2,
-		NodeTimeout:   5 * time.Second,
-		Log:           log,
-	})
-	api := httptest.NewServer(handler)
-	t.Cleanup(api.Close)
-	return &env{api: api, handler: handler, meta: db, store: store, node: node, spoolDir: spoolDir}
+	return testcluster.New(t, testcluster.Opts{Nodes: 1})
 }
 
 // do sends method to path with body and optional header pairs and returns
-// the response with its body fully read.
-func (e *env) do(t *testing.T, method, path string, body io.Reader, hdr ...string) (*http.Response, []byte) {
+// the response with its body fully read, failing the test on a transport
+// error.
+func do(t *testing.T, c *testcluster.Cluster, method, path string, body io.Reader, hdr ...string) (*http.Response, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(method, e.api.URL+path, body)
+	resp, b, err := c.Client().Do(method, path, body, hdr...)
 	if err != nil {
 		t.Fatal(err)
-	}
-	for i := 0; i+1 < len(hdr); i += 2 {
-		req.Header.Set(hdr[i], hdr[i+1])
-	}
-	resp, err := e.api.Client().Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("%s %s: read body: %v", method, path, err)
 	}
 	return resp, b
 }
 
-func (e *env) createBucket(t *testing.T, name string) {
+func createBucket(t *testing.T, c *testcluster.Cluster, name string) {
 	t.Helper()
-	resp, body := e.do(t, http.MethodPut, "/v1/"+name, nil)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create bucket %s = %d %s", name, resp.StatusCode, body)
+	if err := c.Client().CreateBucket(name); err != nil {
+		t.Fatalf("create bucket %s: %v", name, err)
 	}
-}
-
-func (e *env) spoolFiles(t *testing.T) []string {
-	t.Helper()
-	entries, err := os.ReadDir(e.spoolDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, ent := range entries {
-		names = append(names, ent.Name())
-	}
-	return names
-}
-
-func (e *env) blobCount(t *testing.T) int {
-	t.Helper()
-	n, err := e.store.BlobCount()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return n
 }
 
 func errCode(t *testing.T, body []byte) string {
@@ -149,31 +70,27 @@ func randomBytes(n int) []byte {
 }
 
 func TestRoundTrip3MiB(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "photos")
+	c := newCluster(t)
+	createBucket(t, c, "photos")
 	payload := randomBytes(3 << 20)
 	want := digest(payload)
 
-	resp, body := e.do(t, http.MethodPut, "/v1/photos/2026/cat.jpg", bytes.NewReader(payload), "Content-Type", "image/jpeg")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT = %d %s", resp.StatusCode, body)
+	pr, err := c.Client().Put("photos", "2026/cat.jpg", payload, "image/jpeg")
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
 	}
-	if got := resp.Header.Get("ETag"); got != `"`+want+`"` {
-		t.Fatalf("PUT ETag = %s, want %q", got, want)
-	}
-	var pr putResponse
-	if err := json.Unmarshal(body, &pr); err != nil {
-		t.Fatalf("PUT body %q: %v", body, err)
+	if pr.ETag != `"`+want+`"` {
+		t.Fatalf("PUT ETag = %s, want %q", pr.ETag, want)
 	}
 	if pr.Bucket != "photos" || pr.Key != "2026/cat.jpg" || pr.Size != int64(len(payload)) || pr.SHA256 != want ||
-		len(pr.Replicas) != 1 || pr.Replicas[0] != "n1" || pr.Quorum != 1 {
+		len(pr.Replicas) != 1 || pr.Replicas[0] != c.NodeID(0) || pr.Quorum != 1 {
 		t.Fatalf("PUT body = %+v", pr)
 	}
-	if files := e.spoolFiles(t); len(files) != 0 {
+	if files := c.SpoolFiles(); len(files) != 0 {
 		t.Fatalf("spool not cleaned: %v", files)
 	}
 
-	resp, body = e.do(t, http.MethodGet, "/v1/photos/2026/cat.jpg", nil)
+	resp, body := do(t, c, http.MethodGet, "/v1/photos/2026/cat.jpg", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET = %d %s", resp.StatusCode, body)
 	}
@@ -193,7 +110,7 @@ func TestRoundTrip3MiB(t *testing.T) {
 		t.Fatalf("GET Last-Modified %q: %v", resp.Header.Get("Last-Modified"), err)
 	}
 
-	resp, body = e.do(t, http.MethodHead, "/v1/photos/2026/cat.jpg", nil)
+	resp, body = do(t, c, http.MethodHead, "/v1/photos/2026/cat.jpg", nil)
 	if resp.StatusCode != http.StatusOK || len(body) != 0 {
 		t.Fatalf("HEAD = %d, %d body bytes", resp.StatusCode, len(body))
 	}
@@ -204,20 +121,23 @@ func TestRoundTrip3MiB(t *testing.T) {
 }
 
 func TestDefaultContentType(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
-	if resp, body := e.do(t, http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x"))); resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT = %d %s", resp.StatusCode, body)
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
+	if _, err := c.Client().Put("bkt", "k", []byte("x"), ""); err != nil {
+		t.Fatalf("PUT: %v", err)
 	}
-	resp, _ := e.do(t, http.MethodGet, "/v1/bkt/k", nil)
-	if got := resp.Header.Get("Content-Type"); got != "application/octet-stream" {
-		t.Fatalf("Content-Type = %q", got)
+	obj, err := c.Client().Get("bkt", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj.ContentType != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q", obj.ContentType)
 	}
 }
 
 func TestNotFound(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
 	for _, tc := range []struct{ method, path, code string }{
 		{http.MethodGet, "/v1/nope/k", "NoSuchBucket"},
 		{http.MethodHead, "/v1/nope/k", ""},
@@ -230,7 +150,7 @@ func TestNotFound(t *testing.T) {
 		if tc.method == http.MethodPut {
 			body = bytes.NewReader([]byte("x"))
 		}
-		resp, b := e.do(t, tc.method, tc.path, body)
+		resp, b := do(t, c, tc.method, tc.path, body)
 		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("%s %s = %d %s, want 404", tc.method, tc.path, resp.StatusCode, b)
 			continue
@@ -242,44 +162,47 @@ func TestNotFound(t *testing.T) {
 }
 
 func TestDeleteIsMetadataOnly(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
-	if resp, body := e.do(t, http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x"))); resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT = %d %s", resp.StatusCode, body)
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
+	cl := c.Client()
+	if _, err := cl.Put("bkt", "k", []byte("x"), ""); err != nil {
+		t.Fatalf("PUT: %v", err)
 	}
-	if resp, body := e.do(t, http.MethodDelete, "/v1/bkt/k", nil); resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("DELETE = %d %s", resp.StatusCode, body)
+	blobID, _ := c.Locate("bkt", "k")
+	if err := cl.Delete("bkt", "k"); err != nil {
+		t.Fatalf("DELETE: %v", err)
 	}
-	if resp, _ := e.do(t, http.MethodGet, "/v1/bkt/k", nil); resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("GET after DELETE = %d", resp.StatusCode)
+	var apiErr *testcluster.APIError
+	if _, err := cl.Get("bkt", "k"); !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+		t.Fatalf("GET after DELETE = %v", err)
 	}
-	if resp, _ := e.do(t, http.MethodDelete, "/v1/bkt/k", nil); resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("second DELETE = %d", resp.StatusCode)
+	if err := cl.Delete("bkt", "k"); err != nil {
+		t.Fatalf("second DELETE: %v", err)
 	}
-	if n := e.blobCount(t); n != 1 {
-		t.Fatalf("node blob count after DELETE = %d, want 1 (physical delete is deferred)", n)
+	if !c.HasBlob(0, blobID) {
+		t.Fatal("blob gone from node after DELETE, want it kept (physical delete is deferred)")
 	}
-	if n, err := e.meta.CountPending(context.Background()); err != nil || n != 1 {
+	if n, err := c.Meta().CountPending(context.Background()); err != nil || n != 1 {
 		t.Fatalf("pending deletes = %d, %v; want 1", n, err)
 	}
 }
 
 func TestBucketRoutes(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
-	resp, body := e.do(t, http.MethodPut, "/v1/bkt", nil)
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
+	resp, body := do(t, c, http.MethodPut, "/v1/bkt", nil)
 	if resp.StatusCode != http.StatusConflict || errCode(t, body) != "BucketAlreadyExists" {
 		t.Fatalf("second create = %d %s", resp.StatusCode, body)
 	}
-	resp, body = e.do(t, http.MethodPut, "/v1/Bad_Name", nil)
+	resp, body = do(t, c, http.MethodPut, "/v1/Bad_Name", nil)
 	if resp.StatusCode != http.StatusBadRequest || errCode(t, body) != "InvalidBucket" {
 		t.Fatalf("bad name = %d %s", resp.StatusCode, body)
 	}
 }
 
 func TestInvalidKeys(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
 	for _, path := range []string{
 		"/v1/bkt/",
 		"/v1/bkt/a%2F..%2Fb",
@@ -287,7 +210,7 @@ func TestInvalidKeys(t *testing.T) {
 		"/v1/bkt/" + string(bytes.Repeat([]byte("k"), 1025)),
 		"/v1/bkt/%ff",
 	} {
-		resp, body := e.do(t, http.MethodPut, path, bytes.NewReader([]byte("x")))
+		resp, body := do(t, c, http.MethodPut, path, bytes.NewReader([]byte("x")))
 		if resp.StatusCode != http.StatusBadRequest || errCode(t, body) != "InvalidKey" {
 			t.Errorf("PUT %s = %d %s, want 400 InvalidKey", path, resp.StatusCode, body)
 		}
@@ -303,44 +226,44 @@ func (f failingBody) Read([]byte) (int, error) {
 }
 
 func TestLengthRequired(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
 	req := httptest.NewRequest(http.MethodPut, "/v1/bkt/k", io.NopCloser(failingBody{t}))
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
-	e.handler.ServeHTTP(rec, req)
+	c.Coordinator().Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusLengthRequired || errCode(t, rec.Body.Bytes()) != "LengthRequired" {
 		t.Fatalf("PUT without length = %d %s", rec.Code, rec.Body)
 	}
 }
 
 func TestTooLargeBeforeBodyRead(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
 	req := httptest.NewRequest(http.MethodPut, "/v1/bkt/k", io.NopCloser(failingBody{t}))
-	req.ContentLength = testMaxSize + 1
+	req.ContentLength = testcluster.MaxObjectSize + 1
 	rec := httptest.NewRecorder()
-	e.handler.ServeHTTP(rec, req)
+	c.Coordinator().Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge || errCode(t, rec.Body.Bytes()) != "EntityTooLarge" {
 		t.Fatalf("oversized PUT = %d %s", rec.Code, rec.Body)
 	}
-	if files := e.spoolFiles(t); len(files) != 0 {
+	if files := c.SpoolFiles(); len(files) != 0 {
 		t.Fatalf("spool created for rejected PUT: %v", files)
 	}
 }
 
 func TestClientAbortLeavesNothing(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
 	pr, pw := io.Pipe()
-	req, err := http.NewRequest(http.MethodPut, e.api.URL+"/v1/bkt/k", pr)
+	req, err := http.NewRequest(http.MethodPut, c.Client().URL()+"/v1/bkt/k", pr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.ContentLength = 3 << 20
 	errc := make(chan error, 1)
 	go func() {
-		_, err := e.api.Client().Do(req)
+		_, err := http.DefaultClient.Do(req)
 		errc <- err
 	}()
 	if _, err := pw.Write(randomBytes(1 << 20)); err != nil {
@@ -351,85 +274,84 @@ func TestClientAbortLeavesNothing(t *testing.T) {
 		t.Fatal("aborted PUT did not fail on the client side")
 	}
 
-	testcluster.WaitFor(t, 5*time.Second, "spool cleanup", func() bool { return len(e.spoolFiles(t)) == 0 })
-	if _, err := e.meta.GetObject(context.Background(), "bkt", "k"); !errors.Is(err, meta.ErrNoSuchKey) {
+	testcluster.WaitFor(t, func() bool { return len(c.SpoolFiles()) == 0 }, "spool cleanup")
+	if _, err := c.Meta().GetObject(context.Background(), "bkt", "k"); !errors.Is(err, meta.ErrNoSuchKey) {
 		t.Fatalf("object exists after abort: %v", err)
 	}
-	if n := e.blobCount(t); n != 0 {
+	st, err := c.Client().Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := st.Nodes[0].BlobCount; n != 0 {
 		t.Fatalf("node has %d blobs after abort, want 0", n)
 	}
 }
 
 func TestOverwriteQueuesOldReplica(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
+	cl := c.Client()
 	ctx := context.Background()
-	if resp, body := e.do(t, http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("v1"))); resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT v1 = %d %s", resp.StatusCode, body)
+	if _, err := cl.Put("bkt", "k", []byte("v1"), ""); err != nil {
+		t.Fatalf("PUT v1: %v", err)
 	}
-	first, err := e.meta.GetObject(ctx, "bkt", "k")
-	if err != nil {
-		t.Fatal(err)
+	first, _ := c.Locate("bkt", "k")
+	if _, err := cl.Put("bkt", "k", []byte("v2"), ""); err != nil {
+		t.Fatalf("PUT v2: %v", err)
 	}
-	if resp, body := e.do(t, http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("v2"))); resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT v2 = %d %s", resp.StatusCode, body)
-	}
-	second, err := e.meta.GetObject(ctx, "bkt", "k")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.BlobID == second.BlobID {
+	second, _ := c.Locate("bkt", "k")
+	if first == second {
 		t.Fatal("overwrite reused the blob id")
 	}
-	if reps, err := e.meta.Replicas(ctx, first.BlobID); err != nil || len(reps) != 0 {
+	if reps, err := c.Meta().Replicas(ctx, first); err != nil || len(reps) != 0 {
 		t.Fatalf("old blob still has replicas %v, %v", reps, err)
 	}
-	if n, err := e.meta.CountPending(ctx); err != nil || n != 1 {
+	if n, err := c.Meta().CountPending(ctx); err != nil || n != 1 {
 		t.Fatalf("pending deletes = %d, %v; want 1", n, err)
 	}
-	if n := e.blobCount(t); n != 2 {
-		t.Fatalf("node blob count = %d, want 2 (old blob not deleted inline)", n)
+	if !c.HasBlob(0, first) || !c.HasBlob(0, second) {
+		t.Fatalf("node holds old=%v new=%v, want both (old blob not deleted inline)", c.HasBlob(0, first), c.HasBlob(0, second))
 	}
-	if _, body := e.do(t, http.MethodGet, "/v1/bkt/k", nil); string(body) != "v2" {
-		t.Fatalf("GET after overwrite = %q", body)
+	if obj, err := cl.Get("bkt", "k"); err != nil || string(obj.Body) != "v2" {
+		t.Fatalf("GET after overwrite = %q, %v", obj.Body, err)
 	}
 }
 
 func TestNodeDownOnGet(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
-	if resp, body := e.do(t, http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x"))); resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT = %d %s", resp.StatusCode, body)
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
+	if _, err := c.Client().Put("bkt", "k", []byte("x"), ""); err != nil {
+		t.Fatalf("PUT: %v", err)
 	}
-	e.node.Close()
-	resp, body := e.do(t, http.MethodGet, "/v1/bkt/k", nil)
+	c.Kill(0)
+	resp, body := do(t, c, http.MethodGet, "/v1/bkt/k", nil)
 	if resp.StatusCode != http.StatusServiceUnavailable || errCode(t, body) != "NoHealthyReplica" {
 		t.Fatalf("GET with node down = %d %s", resp.StatusCode, body)
 	}
-	if resp, _ := e.do(t, http.MethodHead, "/v1/bkt/k", nil); resp.StatusCode != http.StatusOK {
+	if resp, _ := do(t, c, http.MethodHead, "/v1/bkt/k", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("HEAD with node down = %d, want 200 from metadata", resp.StatusCode)
 	}
 }
 
 func TestNodeDownOnPut(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
-	e.node.Close()
-	resp, body := e.do(t, http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x")))
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
+	c.Kill(0)
+	resp, body := do(t, c, http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x")))
 	if resp.StatusCode != http.StatusServiceUnavailable || errCode(t, body) != "InsufficientReplicas" {
 		t.Fatalf("PUT with node down = %d %s", resp.StatusCode, body)
 	}
-	if _, err := e.meta.GetObject(context.Background(), "bkt", "k"); !errors.Is(err, meta.ErrNoSuchKey) {
+	if _, err := c.Meta().GetObject(context.Background(), "bkt", "k"); !errors.Is(err, meta.ErrNoSuchKey) {
 		t.Fatalf("object committed without a replica: %v", err)
 	}
-	if files := e.spoolFiles(t); len(files) != 0 {
+	if files := c.SpoolFiles(); len(files) != 0 {
 		t.Fatalf("spool not cleaned: %v", files)
 	}
 }
 
 func TestNoHealthyNodesOnPut(t *testing.T) {
-	e := newEnv(t)
-	e.createBucket(t, "bkt")
+	c := newCluster(t)
+	createBucket(t, c, "bkt")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
@@ -440,9 +362,9 @@ func TestNoHealthyNodesOnPut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewHandler(Config{
-		Meta: e.meta, Nodes: empty, SpoolDir: e.spoolDir,
-		MaxObjectSize: testMaxSize, MaxUploads: 1, NodeTimeout: time.Second, Log: log,
+	handler := api.NewHandler(api.Config{
+		Meta: c.Meta(), Nodes: empty, SpoolDir: t.TempDir(),
+		MaxObjectSize: testcluster.MaxObjectSize, MaxUploads: 1, NodeTimeout: time.Second, Log: log,
 	})
 	req := httptest.NewRequest(http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x")))
 	rec := httptest.NewRecorder()
@@ -453,28 +375,24 @@ func TestNoHealthyNodesOnPut(t *testing.T) {
 }
 
 func TestHeartbeatRegistersNode(t *testing.T) {
-	e := newEnv(t)
+	c := newCluster(t)
 	// The node package's type is what real nodes send; the registry must
 	// accept it verbatim.
 	body, err := json.Marshal(storage.Heartbeat{NodeID: "n2", Addr: "http://n2:9000", BlobCount: 7, FreeBytes: 99})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, out := e.do(t, http.MethodPost, "/internal/heartbeat", bytes.NewReader(body), "Content-Type", "application/json")
+	resp, out := do(t, c, http.MethodPost, "/internal/heartbeat", bytes.NewReader(body), "Content-Type", "application/json")
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("heartbeat = %d %s", resp.StatusCode, out)
 	}
-	nodes, err := e.meta.ListNodes(context.Background())
+	nodes, err := c.Meta().ListNodes(context.Background())
 	if err != nil || len(nodes) != 2 || nodes[1].ID != "n2" || nodes[1].Addr != "http://n2:9000" || nodes[1].Status != cluster.StatusUp {
 		t.Fatalf("ListNodes = %+v, %v", nodes, err)
 	}
-	resp, out = e.do(t, http.MethodGet, "/cluster/status", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d %s", resp.StatusCode, out)
-	}
-	var st statusResponse
-	if err := json.Unmarshal(out, &st); err != nil {
-		t.Fatalf("status body %s: %v", out, err)
+	st, err := c.Client().Status()
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(st.Nodes) != 2 || st.Nodes[1].NodeID != "n2" || st.Nodes[1].BlobCount != 7 || st.Nodes[1].FreeBytes != 99 {
 		t.Fatalf("status nodes = %+v", st.Nodes)
@@ -482,21 +400,21 @@ func TestHeartbeatRegistersNode(t *testing.T) {
 }
 
 func TestMalformedHeartbeat(t *testing.T) {
-	e := newEnv(t)
+	c := newCluster(t)
 	for _, body := range []string{"", "{", `{"node_id":"","addr":"http://x:1"}`, `{"node_id":"n9","addr":"x:1"}`} {
-		resp, out := e.do(t, http.MethodPost, "/internal/heartbeat", bytes.NewReader([]byte(body)), "Content-Type", "application/json")
+		resp, out := do(t, c, http.MethodPost, "/internal/heartbeat", bytes.NewReader([]byte(body)), "Content-Type", "application/json")
 		if resp.StatusCode != http.StatusBadRequest || errCode(t, out) != "InvalidHeartbeat" {
 			t.Errorf("heartbeat %q = %d %s, want 400 InvalidHeartbeat", body, resp.StatusCode, out)
 		}
 	}
-	if nodes, err := e.meta.ListNodes(context.Background()); err != nil || len(nodes) != 1 {
+	if nodes, err := c.Meta().ListNodes(context.Background()); err != nil || len(nodes) != 1 {
 		t.Fatalf("malformed heartbeat registered a node: %+v, %v", nodes, err)
 	}
 }
 
 func TestClusterStatusShape(t *testing.T) {
-	e := newEnv(t)
-	resp, out := e.do(t, http.MethodGet, "/cluster/status", nil)
+	c := newCluster(t)
+	resp, out := do(t, c, http.MethodGet, "/cluster/status", nil)
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "application/json" {
 		t.Fatalf("status = %d %s %s", resp.StatusCode, resp.Header.Get("Content-Type"), out)
 	}
@@ -520,39 +438,11 @@ func TestClusterStatusShape(t *testing.T) {
 	if len(n) != 7 {
 		t.Errorf("status node has %d fields, want 7: %s", len(n), st["nodes"])
 	}
-	if string(n["node_id"]) != `"n1"` || string(n["status"]) != `"UP"` {
+	if string(n["node_id"]) != `"`+c.NodeID(0)+`"` || string(n["status"]) != `"UP"` {
 		t.Errorf("status node = %s", st["nodes"])
 	}
 	var ts time.Time
 	if err := json.Unmarshal(n["last_seen"], &ts); err != nil || ts.IsZero() {
 		t.Errorf("last_seen %s is not an RFC3339 time: %v", n["last_seen"], err)
-	}
-}
-
-func TestStatusFor(t *testing.T) {
-	for _, tc := range []struct {
-		err    error
-		status int
-		code   string
-	}{
-		{ErrInvalidBucket, 400, "InvalidBucket"},
-		{ErrInvalidKey, 400, "InvalidKey"},
-		{ErrInvalidArgument, 400, "InvalidArgument"},
-		{ErrLengthRequired, 411, "LengthRequired"},
-		{ErrTooLarge, 413, "EntityTooLarge"},
-		{ErrBodyRead, 400, "IncompleteBody"},
-		{cluster.ErrInvalidHeartbeat, 400, "InvalidHeartbeat"},
-		{ErrInsufficientReplicas, 503, "InsufficientReplicas"},
-		{ErrNoHealthyReplica, 503, "NoHealthyReplica"},
-		{meta.ErrNoSuchBucket, 404, "NoSuchBucket"},
-		{meta.ErrNoSuchKey, 404, "NoSuchKey"},
-		{meta.ErrBucketExists, 409, "BucketAlreadyExists"},
-		{meta.ErrBucketNotEmpty, 409, "BucketNotEmpty"},
-		{errors.New("boom"), 500, "InternalError"},
-	} {
-		status, code := statusFor(tc.err)
-		if status != tc.status || code != tc.code {
-			t.Errorf("statusFor(%v) = %d %s, want %d %s", tc.err, status, code, tc.status, tc.code)
-		}
 	}
 }

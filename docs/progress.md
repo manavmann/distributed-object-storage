@@ -1,8 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C9. C9: heartbeat-driven cluster.Registry (fake clock + direct sweep in tests, DB writes only on first sight/addr change/transitions), POST /internal/heartbeat, GET /cluster/status, CAIRN_HEARTBEAT_TIMEOUT (15s); CAIRN_NODES and StaticRegistry deleted everywhere incl. compose.
-Next: C10 — (next roadmap item)
+Done: C1–C10. C10: internal/placement HRW ranking — Rank/Targets over splitmix64(fnv64a(nodeID+"\x00"+key)), tie-break by id, 2 allocs/call, no callers yet.
+Next: C11 — (next roadmap item)
 
 ## Hours ledger
 | Item | Est | Actual | Notes |
@@ -16,3 +16,4 @@ Next: C10 — (next roadmap item)
 | C7 | 3h | | listing at /v1/{bucket}/ (trailing slash); docs/architecture.md still empty — error table lives in statusFor doc comment |
 | C8 | 3h | | nonroot writes named volume fine via COPY --chown /data (no root fallback); node1 logs heartbeat 404s until coordinator serves /internal/heartbeat |
 | C9 | 3h | | compose: node1 DOWN ~12s after stop, UP <1s after start; node_up/node_down logged; under_replicated hardwired 0; status strings are UP/DOWN, old "up" rows self-heal on first heartbeat |
+| C10 | 3h | | raw FNV-1a fails ±20% on sequential keys (800/3600 with hostname ids); splitmix64 finalizer added ; Rank4 227ns, Rank16 1.07µs |

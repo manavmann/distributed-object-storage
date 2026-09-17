@@ -56,24 +56,21 @@ func main() {
 // serve runs the node on ln until ctx is done, then drains in-flight
 // requests and waits for the heartbeat loop before returning.
 func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slog.Logger) error {
-	store, err := storage.Open(cfg.DataDir)
+	node, err := storage.NewNode(cfg.DataDir, storage.NodeOptions{
+		ID: cfg.NodeID, HeartbeatInterval: cfg.HeartbeatInterval, Log: log,
+	})
 	if err != nil {
 		return err
 	}
 	srv := &http.Server{
-		Handler:           storage.NewHandler(store, log),
+		Handler:           node.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Info("node.start", "version", version, "node_id", cfg.NodeID, "addr", ln.Addr().String(),
 		"data_dir", cfg.DataDir, "coordinator", cfg.CoordinatorURL)
 
 	hbCtx, stopHeartbeat := context.WithCancel(ctx)
-	heartbeatDone := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		storage.RunHeartbeat(hbCtx, &http.Client{Timeout: cfg.HeartbeatInterval}, cfg.CoordinatorURL,
-			cfg.HeartbeatInterval, func() storage.Heartbeat { return status(cfg, store, log) }, log)
-	}()
+	heartbeatDone := node.StartHeartbeat(hbCtx, cfg.CoordinatorURL, cfg.AdvertiseAddr)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
@@ -95,18 +92,4 @@ func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slo
 		return fmt.Errorf("serve: %w", serr)
 	}
 	return err
-}
-
-// status is what each heartbeat reports. Counting failures are logged and
-// reported as zero rather than skipping the heartbeat.
-func status(cfg config.NodeConfig, store *storage.Store, log *slog.Logger) storage.Heartbeat {
-	count, err := store.BlobCount()
-	if err != nil {
-		log.Warn("node.blob_count", "err", err)
-	}
-	free, err := store.FreeBytes()
-	if err != nil {
-		log.Warn("node.free_bytes", "err", err)
-	}
-	return storage.Heartbeat{NodeID: cfg.NodeID, Addr: cfg.AdvertiseAddr, BlobCount: count, FreeBytes: free}
 }
