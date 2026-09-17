@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
 )
@@ -32,7 +33,7 @@ var (
 // statusFor is the single place an error becomes an HTTP status and code.
 // The public table:
 //
-//	400 InvalidBucket InvalidKey InvalidArgument IncompleteBody
+//	400 InvalidBucket InvalidKey InvalidArgument IncompleteBody InvalidHeartbeat
 //	404 NoSuchBucket NoSuchKey
 //	409 BucketAlreadyExists BucketNotEmpty
 //	411 LengthRequired
@@ -51,6 +52,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusLengthRequired, "LengthRequired"
 	case errors.Is(err, ErrTooLarge):
 		return http.StatusRequestEntityTooLarge, "EntityTooLarge"
+	case errors.Is(err, cluster.ErrInvalidHeartbeat):
+		return http.StatusBadRequest, "InvalidHeartbeat"
 	case errors.Is(err, ErrBodyRead):
 		return http.StatusBadRequest, "IncompleteBody"
 	case errors.Is(err, ErrInsufficientReplicas):

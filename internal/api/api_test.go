@@ -53,13 +53,17 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	if err := db.UpsertNode(context.Background(), meta.Node{ID: "n1", Addr: node.URL, Status: "up"}); err != nil {
+	nodes, err := cluster.Load(context.Background(), db, time.Minute, time.Now, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := nodes.Heartbeat(context.Background(), cluster.Heartbeat{NodeID: "n1", Addr: node.URL}); err != nil {
 		t.Fatal(err)
 	}
 	spoolDir := t.TempDir()
 	handler := NewHandler(Config{
 		Meta:          db,
-		Nodes:         cluster.NewStatic([]cluster.Node{{ID: "n1", Addr: node.URL}}),
+		Nodes:         nodes,
 		SpoolDir:      spoolDir,
 		MaxObjectSize: testMaxSize,
 		MaxUploads:    2,
@@ -426,16 +430,102 @@ func TestNodeDownOnPut(t *testing.T) {
 func TestNoHealthyNodesOnPut(t *testing.T) {
 	e := newEnv(t)
 	e.createBucket(t, "bkt")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	empty, err := cluster.Load(context.Background(), db, time.Minute, time.Now, log)
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler := NewHandler(Config{
-		Meta: e.meta, Nodes: cluster.NewStatic(nil), SpoolDir: e.spoolDir,
-		MaxObjectSize: testMaxSize, MaxUploads: 1, NodeTimeout: time.Second,
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Meta: e.meta, Nodes: empty, SpoolDir: e.spoolDir,
+		MaxObjectSize: testMaxSize, MaxUploads: 1, NodeTimeout: time.Second, Log: log,
 	})
 	req := httptest.NewRequest(http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x")))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable || errCode(t, rec.Body.Bytes()) != "InsufficientReplicas" {
 		t.Fatalf("PUT with no nodes = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestHeartbeatRegistersNode(t *testing.T) {
+	e := newEnv(t)
+	// The node package's type is what real nodes send; the registry must
+	// accept it verbatim.
+	body, err := json.Marshal(storage.Heartbeat{NodeID: "n2", Addr: "http://n2:9000", BlobCount: 7, FreeBytes: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, out := e.do(t, http.MethodPost, "/internal/heartbeat", bytes.NewReader(body), "Content-Type", "application/json")
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("heartbeat = %d %s", resp.StatusCode, out)
+	}
+	nodes, err := e.meta.ListNodes(context.Background())
+	if err != nil || len(nodes) != 2 || nodes[1].ID != "n2" || nodes[1].Addr != "http://n2:9000" || nodes[1].Status != cluster.StatusUp {
+		t.Fatalf("ListNodes = %+v, %v", nodes, err)
+	}
+	resp, out = e.do(t, http.MethodGet, "/cluster/status", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d %s", resp.StatusCode, out)
+	}
+	var st statusResponse
+	if err := json.Unmarshal(out, &st); err != nil {
+		t.Fatalf("status body %s: %v", out, err)
+	}
+	if len(st.Nodes) != 2 || st.Nodes[1].NodeID != "n2" || st.Nodes[1].BlobCount != 7 || st.Nodes[1].FreeBytes != 99 {
+		t.Fatalf("status nodes = %+v", st.Nodes)
+	}
+}
+
+func TestMalformedHeartbeat(t *testing.T) {
+	e := newEnv(t)
+	for _, body := range []string{"", "{", `{"node_id":"","addr":"http://x:1"}`, `{"node_id":"n9","addr":"x:1"}`} {
+		resp, out := e.do(t, http.MethodPost, "/internal/heartbeat", bytes.NewReader([]byte(body)), "Content-Type", "application/json")
+		if resp.StatusCode != http.StatusBadRequest || errCode(t, out) != "InvalidHeartbeat" {
+			t.Errorf("heartbeat %q = %d %s, want 400 InvalidHeartbeat", body, resp.StatusCode, out)
+		}
+	}
+	if nodes, err := e.meta.ListNodes(context.Background()); err != nil || len(nodes) != 1 {
+		t.Fatalf("malformed heartbeat registered a node: %+v, %v", nodes, err)
+	}
+}
+
+func TestClusterStatusShape(t *testing.T) {
+	e := newEnv(t)
+	resp, out := e.do(t, http.MethodGet, "/cluster/status", nil)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("status = %d %s %s", resp.StatusCode, resp.Header.Get("Content-Type"), out)
+	}
+	var st map[string]json.RawMessage
+	if err := json.Unmarshal(out, &st); err != nil {
+		t.Fatalf("status body %s: %v", out, err)
+	}
+	if len(st) != 2 || st["nodes"] == nil || string(st["under_replicated"]) != "0" {
+		t.Fatalf("status top-level = %s", out)
+	}
+	var nodes []map[string]json.RawMessage
+	if err := json.Unmarshal(st["nodes"], &nodes); err != nil || len(nodes) != 1 {
+		t.Fatalf("status nodes = %s: %v", st["nodes"], err)
+	}
+	n := nodes[0]
+	for _, k := range []string{"node_id", "addr", "status", "free_bytes", "blob_count", "last_seen", "status_changed_at"} {
+		if n[k] == nil {
+			t.Errorf("status node lacks %q: %s", k, st["nodes"])
+		}
+	}
+	if len(n) != 7 {
+		t.Errorf("status node has %d fields, want 7: %s", len(n), st["nodes"])
+	}
+	if string(n["node_id"]) != `"n1"` || string(n["status"]) != `"UP"` {
+		t.Errorf("status node = %s", st["nodes"])
+	}
+	var ts time.Time
+	if err := json.Unmarshal(n["last_seen"], &ts); err != nil || ts.IsZero() {
+		t.Errorf("last_seen %s is not an RFC3339 time: %v", n["last_seen"], err)
 	}
 }
 
@@ -451,6 +541,7 @@ func TestStatusFor(t *testing.T) {
 		{ErrLengthRequired, 411, "LengthRequired"},
 		{ErrTooLarge, 413, "EntityTooLarge"},
 		{ErrBodyRead, 400, "IncompleteBody"},
+		{cluster.ErrInvalidHeartbeat, 400, "InvalidHeartbeat"},
 		{ErrInsufficientReplicas, 503, "InsufficientReplicas"},
 		{ErrNoHealthyReplica, 503, "NoHealthyReplica"},
 		{meta.ErrNoSuchBucket, 404, "NoSuchBucket"},

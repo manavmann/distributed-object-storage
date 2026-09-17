@@ -1,5 +1,6 @@
 // Package coordinator wires the coordinator's parts together: metadata
-// store, node registry and the HTTP API. It owns their lifetimes.
+// store, node registry, health monitor and the HTTP API. It owns their
+// lifetimes.
 package coordinator
 
 import (
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/api"
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
@@ -16,16 +18,21 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/meta"
 )
 
+// monitorTick is how often the health monitor looks for silent nodes.
+const monitorTick = time.Second
+
 // Coordinator is a running control plane minus its listener.
 type Coordinator struct {
-	meta    *meta.DB
-	handler http.Handler
+	meta        *meta.DB
+	handler     http.Handler
+	stopMonitor context.CancelFunc
+	monitorDone chan struct{}
 }
 
-// New opens DATA_DIR/meta.db, prepares DATA_DIR/spool, records every
-// configured node in metadata so replica rows can reference it, and
-// builds the API handler. Spool files left by a previous run are removed:
-// their uploads were never committed.
+// New opens DATA_DIR/meta.db, prepares DATA_DIR/spool, loads the node
+// registry from metadata, starts the health monitor and builds the API
+// handler. Spool files left by a previous run are removed: their uploads
+// were never committed.
 func New(cfg config.CoordinatorConfig, log *slog.Logger) (*Coordinator, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("coordinator: data dir: %w", err)
@@ -41,24 +48,31 @@ func New(cfg config.CoordinatorConfig, log *slog.Logger) (*Coordinator, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, n := range cfg.Nodes {
-		if err := db.UpsertNode(context.Background(), meta.Node{ID: n.ID, Addr: n.Addr, Status: "up"}); err != nil {
-			db.Close()
-			return nil, err
-		}
+	nodes, err := cluster.Load(context.Background(), db, cfg.HeartbeatTimeout, time.Now, log)
+	if err != nil {
+		db.Close()
+		return nil, err
 	}
-	return &Coordinator{
+	ctx, stop := context.WithCancel(context.Background())
+	c := &Coordinator{
 		meta: db,
 		handler: api.NewHandler(api.Config{
 			Meta:          db,
-			Nodes:         cluster.NewStatic(cfg.Nodes),
+			Nodes:         nodes,
 			SpoolDir:      spoolDir,
 			MaxObjectSize: cfg.MaxObjectSize,
 			MaxUploads:    cfg.MaxUploads,
 			NodeTimeout:   cfg.NodeTimeout,
 			Log:           log,
 		}),
-	}, nil
+		stopMonitor: stop,
+		monitorDone: make(chan struct{}),
+	}
+	go func() {
+		defer close(c.monitorDone)
+		nodes.Monitor(ctx, monitorTick)
+	}()
+	return c, nil
 }
 
 // Handler is the public HTTP API.
@@ -66,7 +80,9 @@ func (c *Coordinator) Handler() http.Handler {
 	return c.handler
 }
 
-// Close releases the metadata store.
+// Close stops the health monitor and releases the metadata store.
 func (c *Coordinator) Close() error {
+	c.stopMonitor()
+	<-c.monitorDone
 	return c.meta.Close()
 }

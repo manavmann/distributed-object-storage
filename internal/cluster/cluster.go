@@ -1,80 +1,202 @@
 // Package cluster answers "which storage nodes can take traffic right now".
-// The only implementation so far is a static list from CAIRN_NODES; the
-// health monitor will replace it with one backed by heartbeats.
+// The answer is driven by heartbeats: a node is UP while it keeps posting
+// to /internal/heartbeat and DOWN once the monitor sees it go quiet for
+// longer than the timeout. Metadata is written only on first sight, on an
+// address change and on a status transition, never per heartbeat.
 package cluster
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/manavmann/distributed-object-storage/internal/meta"
 )
 
-// ErrInvalidNodes is wrapped by every CAIRN_NODES parse failure.
-var ErrInvalidNodes = errors.New("cluster: invalid CAIRN_NODES")
+// ErrInvalidHeartbeat is wrapped by every heartbeat the registry rejects.
+var ErrInvalidHeartbeat = errors.New("cluster: invalid heartbeat")
 
-// Node is a storage node the coordinator can address.
+// Node status values as stored in metadata and reported by /cluster/status.
+const (
+	StatusUp   = "UP"
+	StatusDown = "DOWN"
+)
+
+// Heartbeat is the body a storage node POSTs to /internal/heartbeat. It
+// mirrors storage.Heartbeat field for field; the two packages share only
+// the wire format.
+type Heartbeat struct {
+	NodeID    string `json:"node_id"`
+	Addr      string `json:"addr"`
+	BlobCount int    `json:"blob_count"`
+	FreeBytes uint64 `json:"free_bytes"`
+}
+
+// Node is the registry's view of one storage node.
 type Node struct {
 	ID string
 	// Addr is the node's base URL, e.g. http://10.0.0.5:9100.
-	Addr string
+	Addr            string
+	Status          string
+	FreeBytes       uint64
+	BlobCount       int
+	LastSeen        time.Time
+	StatusChangedAt time.Time
 }
 
-// Registry is the placement view of the cluster.
-type Registry interface {
-	// Healthy returns the nodes that may take reads and writes, in a
-	// stable order.
-	Healthy() []Node
-	// Get returns node id and whether it is known at all.
-	Get(id string) (Node, bool)
+// Registry is the placement view of the cluster. It is safe for
+// concurrent use.
+type Registry struct {
+	db      *meta.DB
+	log     *slog.Logger
+	now     func() time.Time
+	timeout time.Duration
+
+	mu    sync.RWMutex
+	nodes map[string]*Node
 }
 
-// StaticRegistry treats every configured node as healthy, always.
-type StaticRegistry struct {
-	nodes []Node
-}
-
-// NewStatic returns a registry over nodes in the given order.
-func NewStatic(nodes []Node) *StaticRegistry {
-	return &StaticRegistry{nodes: append([]Node(nil), nodes...)}
-}
-
-// ParseStatic parses "id=host:port,id=host:port,...". Each host:port
-// becomes http://host:port. Ids must be unique and non-empty.
-func ParseStatic(s string) (*StaticRegistry, error) {
-	if strings.TrimSpace(s) == "" {
-		return nil, fmt.Errorf("%w: empty", ErrInvalidNodes)
+// Load seeds a registry from meta.ListNodes. Every node keeps its persisted
+// status and gets lastSeen=now(), so a node that was UP has one timeout to
+// heartbeat again before the monitor marks it DOWN. now and timeout are
+// injectable so tests can drive a fake clock.
+func Load(ctx context.Context, db *meta.DB, timeout time.Duration, now func() time.Time, log *slog.Logger) (*Registry, error) {
+	rows, err := db.ListNodes(ctx)
+	if err != nil {
+		return nil, err
 	}
-	var nodes []Node
-	seen := map[string]bool{}
-	for _, entry := range strings.Split(s, ",") {
-		entry = strings.TrimSpace(entry)
-		id, hostport, ok := strings.Cut(entry, "=")
-		if !ok || id == "" || hostport == "" {
-			return nil, fmt.Errorf("%w: entry %q is not id=host:port", ErrInvalidNodes, entry)
+	r := &Registry{db: db, log: log, now: now, timeout: timeout, nodes: make(map[string]*Node, len(rows))}
+	seen := now()
+	for _, row := range rows {
+		r.nodes[row.ID] = &Node{
+			ID: row.ID, Addr: row.Addr, Status: row.Status,
+			FreeBytes: uint64(row.FreeBytes), BlobCount: int(row.BlobCount),
+			LastSeen: seen, StatusChangedAt: time.UnixMilli(row.StatusChangedAt),
 		}
-		if strings.Contains(hostport, "/") {
-			return nil, fmt.Errorf("%w: entry %q: address must be host:port, not a URL", ErrInvalidNodes, entry)
-		}
-		if seen[id] {
-			return nil, fmt.Errorf("%w: duplicate node id %q", ErrInvalidNodes, id)
-		}
-		seen[id] = true
-		nodes = append(nodes, Node{ID: id, Addr: "http://" + hostport})
 	}
-	return NewStatic(nodes), nil
+	return r, nil
 }
 
-// Healthy returns every configured node.
-func (r *StaticRegistry) Healthy() []Node {
-	return append([]Node(nil), r.nodes...)
+// Heartbeat records hb: it refreshes the node's address, stats and
+// lastSeen, persists the row on first sight or an address change, and
+// marks a node that was not UP as UP (persisted, logged as node_up).
+func (r *Registry) Heartbeat(ctx context.Context, hb Heartbeat) error {
+	if hb.NodeID == "" {
+		return fmt.Errorf("%w: empty node_id", ErrInvalidHeartbeat)
+	}
+	if !strings.HasPrefix(hb.Addr, "http://") && !strings.HasPrefix(hb.Addr, "https://") {
+		return fmt.Errorf("%w: addr %q is not an http(s) URL", ErrInvalidHeartbeat, hb.Addr)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	n, known := r.nodes[hb.NodeID]
+	if !known {
+		n = &Node{ID: hb.NodeID, Status: StatusUp, StatusChangedAt: now}
+	}
+	persistRow := !known || n.Addr != hb.Addr
+	wasDown := known && n.Status != StatusUp
+	if persistRow {
+		if err := r.db.UpsertNode(ctx, meta.Node{
+			ID: hb.NodeID, Addr: hb.Addr, Status: StatusUp,
+			FreeBytes: int64(hb.FreeBytes), BlobCount: int64(hb.BlobCount),
+		}); err != nil {
+			return err
+		}
+	}
+	if wasDown {
+		if err := r.db.SetNodeStatus(ctx, hb.NodeID, StatusUp); err != nil {
+			return err
+		}
+		n.Status = StatusUp
+		n.StatusChangedAt = now
+		r.log.Info("node_up", "node_id", hb.NodeID, "addr", hb.Addr)
+	}
+	n.Addr = hb.Addr
+	n.FreeBytes = hb.FreeBytes
+	n.BlobCount = hb.BlobCount
+	n.LastSeen = now
+	r.nodes[hb.NodeID] = n
+	return nil
 }
 
-// Get returns the configured node with that id.
-func (r *StaticRegistry) Get(id string) (Node, bool) {
+// Monitor sweeps every tick until ctx is done, marking UP nodes that have
+// not been heard from within the timeout as DOWN.
+func (r *Registry) Monitor(ctx context.Context, tick time.Duration) {
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.sweep(ctx)
+		}
+	}
+}
+
+// sweep is one pass of the monitor. A persist failure leaves the node UP
+// in memory so the next pass retries; the error is logged, not dropped.
+func (r *Registry) sweep(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
 	for _, n := range r.nodes {
-		if n.ID == id {
-			return n, true
+		if n.Status != StatusUp || now.Sub(n.LastSeen) <= r.timeout {
+			continue
+		}
+		if err := r.db.SetNodeStatus(ctx, n.ID, StatusDown); err != nil {
+			r.log.Error("node_down_persist_failed", "node_id", n.ID, "err", err)
+			continue
+		}
+		n.Status = StatusDown
+		n.StatusChangedAt = now
+		r.log.Warn("node_down", "node_id", n.ID, "addr", n.Addr, "last_seen", n.LastSeen)
+	}
+}
+
+// Healthy returns the UP nodes sorted by id.
+func (r *Registry) Healthy() []Node {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Node, 0, len(r.nodes))
+	for _, n := range r.nodes {
+		if n.Status == StatusUp {
+			out = append(out, *n)
 		}
 	}
-	return Node{}, false
+	sortByID(out)
+	return out
+}
+
+// All returns every known node sorted by id.
+func (r *Registry) All() []Node {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Node, 0, len(r.nodes))
+	for _, n := range r.nodes {
+		out = append(out, *n)
+	}
+	sortByID(out)
+	return out
+}
+
+// Get returns the node with that id and whether it is known at all.
+func (r *Registry) Get(id string) (Node, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n, ok := r.nodes[id]
+	if !ok {
+		return Node{}, false
+	}
+	return *n, true
+}
+
+func sortByID(nodes []Node) {
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 }

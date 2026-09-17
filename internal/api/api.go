@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,7 +29,7 @@ import (
 // Config is everything a Server needs.
 type Config struct {
 	Meta  *meta.DB
-	Nodes cluster.Registry
+	Nodes *cluster.Registry
 	// SpoolDir holds one file per PUT in flight; it must exist.
 	SpoolDir string
 	// MaxObjectSize is the largest body a PUT accepts, in bytes.
@@ -43,7 +44,7 @@ type Config struct {
 // Server holds the handler state.
 type Server struct {
 	meta        *meta.DB
-	nodes       cluster.Registry
+	nodes       *cluster.Registry
 	client      *nodeclient.Client
 	spoolDir    string
 	maxSize     int64
@@ -72,6 +73,8 @@ type putResponse struct {
 //	HEAD   /v1/{bucket}/{key...}  200 headers from metadata | 400 | 404
 //	DELETE /v1/{bucket}/{key...}  204 | 400 | 404 no bucket
 //	GET    /healthz               200
+//	POST   /internal/heartbeat    204 | 400 InvalidHeartbeat
+//	GET    /cluster/status        200 {nodes:[...],under_replicated}
 //
 // Every response carries X-Request-ID and every request is logged.
 func NewHandler(cfg Config) http.Handler {
@@ -94,7 +97,51 @@ func NewHandler(cfg Config) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("POST /internal/heartbeat", s.handleHeartbeat)
+	mux.HandleFunc("GET /cluster/status", s.handleClusterStatus)
 	return httpx.RequestID(httpx.Logging(cfg.Log, mux))
+}
+
+// statusNode is one entry of the /cluster/status response.
+type statusNode struct {
+	NodeID          string    `json:"node_id"`
+	Addr            string    `json:"addr"`
+	Status          string    `json:"status"`
+	FreeBytes       uint64    `json:"free_bytes"`
+	BlobCount       int       `json:"blob_count"`
+	LastSeen        time.Time `json:"last_seen"`
+	StatusChangedAt time.Time `json:"status_changed_at"`
+}
+
+// statusResponse is the body of GET /cluster/status.
+type statusResponse struct {
+	Nodes           []statusNode `json:"nodes"`
+	UnderReplicated int          `json:"under_replicated"`
+}
+
+func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var hb cluster.Heartbeat
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&hb); err != nil {
+		s.writeError(w, r, fmt.Errorf("%w: %w", cluster.ErrInvalidHeartbeat, err))
+		return
+	}
+	if err := s.nodes.Heartbeat(r.Context(), hb); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
+	all := s.nodes.All()
+	resp := statusResponse{Nodes: make([]statusNode, 0, len(all))}
+	for _, n := range all {
+		resp.Nodes = append(resp.Nodes, statusNode{
+			NodeID: n.ID, Addr: n.Addr, Status: n.Status, FreeBytes: n.FreeBytes, BlobCount: n.BlobCount,
+			LastSeen: n.LastSeen.UTC(), StatusChangedAt: n.StatusChangedAt.UTC(),
+		})
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handlePutBucket(w http.ResponseWriter, r *http.Request) {

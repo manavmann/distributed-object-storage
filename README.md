@@ -27,6 +27,7 @@ curl      localhost:8080/v1/photos/cat.jpg -o out.jpg      # get object      →
 curl -I   localhost:8080/v1/photos/cat.jpg                 # head object     → 200
 curl      "localhost:8080/v1/photos/?prefix=c&limit=10"    # list objects    → 200
 curl -X DELETE localhost:8080/v1/photos/cat.jpg            # delete object   → 204
+curl      localhost:8080/cluster/status                   # node health     → 200 (UP/DOWN per node)
 ```
 
 ## What works
@@ -38,10 +39,14 @@ curl -X DELETE localhost:8080/v1/photos/cat.jpg            # delete object   →
   before serving a byte, corrupt blobs quarantined and never served.
 - Metadata in SQLite is the only source of truth; replica rows exist only for
   acknowledged, checksummed writes.
+- Cluster membership from heartbeats: nodes register by posting to
+  `/internal/heartbeat`; the monitor marks a node DOWN after
+  `CAIRN_HEARTBEAT_TIMEOUT` (default 15s) of silence and UP again on the next
+  heartbeat. `GET /cluster/status` shows every node.
 - Packaging: one distroless image with both binaries (`deploy/Dockerfile`), no
   shell; `-healthcheck` flag on each binary backs the compose healthchecks.
 
-Not yet: replication factor > 1, node health monitoring, repair, garbage
+Not yet: replication factor > 1, repair, garbage
 collection of deleted blobs, metrics. See `docs/architecture.md` for the design.
 
 ## Development

@@ -9,7 +9,6 @@ services:
     environment:
       CAIRN_ADDR: ":8080"
       CAIRN_DATA_DIR: /data
-      CAIRN_NODES: node1=node1:9000
     ports:
       - "8080:8080"
     volumes:

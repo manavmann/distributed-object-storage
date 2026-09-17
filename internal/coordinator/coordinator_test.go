@@ -3,6 +3,7 @@ package coordinator
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/config"
 	"github.com/manavmann/distributed-object-storage/internal/storage"
 )
@@ -36,8 +36,8 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	}
 
 	cfg := config.CoordinatorConfig{
-		Addr: ":0", DataDir: dataDir, Nodes: []cluster.Node{{ID: "n1", Addr: node.URL}},
-		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second,
+		Addr: ":0", DataDir: dataDir,
+		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
 	}
 	c, err := New(cfg, log)
 	if err != nil {
@@ -48,15 +48,25 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("stale spool file survived New: %v", err)
 	}
+
+	srv := httptest.NewServer(c.Handler())
+	t.Cleanup(srv.Close)
+	hb, _ := json.Marshal(storage.Heartbeat{NodeID: "n1", Addr: node.URL})
+	resp, err := http.Post(srv.URL+"/internal/heartbeat", "application/json", bytes.NewReader(hb))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("heartbeat = %d", resp.StatusCode)
+	}
 	nodes, err := c.meta.ListNodes(context.Background())
 	if err != nil || len(nodes) != 1 || nodes[0].ID != "n1" || nodes[0].Addr != node.URL {
 		t.Fatalf("ListNodes = %+v, %v", nodes, err)
 	}
 
-	srv := httptest.NewServer(c.Handler())
-	t.Cleanup(srv.Close)
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/v1/bkt", nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,5 +97,26 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	}
 	if _, err := c.meta.GetBucket(context.Background(), "bkt"); err != nil {
 		t.Fatalf("bucket not in metadata: %v", err)
+	}
+}
+
+// TestCloseStopsMonitor checks that Close returns once the monitor
+// goroutine has exited, so nothing touches the DB after it is closed.
+func TestCloseStopsMonitor(t *testing.T) {
+	cfg := config.CoordinatorConfig{
+		Addr: ":0", DataDir: t.TempDir(),
+		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
+	}
+	c, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-c.monitorDone:
+	default:
+		t.Fatal("monitor still running after Close")
 	}
 }

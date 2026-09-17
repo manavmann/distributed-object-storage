@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
@@ -11,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/config"
 	"github.com/manavmann/distributed-object-storage/internal/storage"
 )
@@ -35,8 +35,8 @@ func TestServeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.CoordinatorConfig{
-		Addr: ln.Addr().String(), DataDir: t.TempDir(), Nodes: []cluster.Node{{ID: "n1", Addr: node.URL}},
-		MaxObjectSize: 1 << 20, MaxUploads: 2, NodeTimeout: time.Second,
+		Addr: ln.Addr().String(), DataDir: t.TempDir(),
+		MaxObjectSize: 1 << 20, MaxUploads: 2, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -53,6 +53,15 @@ func TestServeRoundTrip(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("healthz = %d", resp.StatusCode)
+	}
+	hb, _ := json.Marshal(storage.Heartbeat{NodeID: "n1", Addr: node.URL})
+	resp, err = http.Post(base+"/internal/heartbeat", "application/json", bytes.NewReader(hb))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("heartbeat = %d", resp.StatusCode)
 	}
 	req, _ := http.NewRequest(http.MethodPut, base+"/v1/bkt", nil)
 	resp, err = http.DefaultClient.Do(req)

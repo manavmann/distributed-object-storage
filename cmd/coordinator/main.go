@@ -66,7 +66,7 @@ func serve(ctx context.Context, cfg config.CoordinatorConfig, ln net.Listener, l
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Info("coordinator.start", "version", version, "addr", ln.Addr().String(),
-		"data_dir", cfg.DataDir, "nodes", len(cfg.Nodes))
+		"data_dir", cfg.DataDir, "heartbeat_timeout", cfg.HeartbeatTimeout)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
