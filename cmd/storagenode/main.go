@@ -23,7 +23,7 @@ import (
 
 const (
 	version         = "0.1.0"
-	shutdownTimeout = 10 * time.Second
+	shutdownTimeout = 30 * time.Second
 )
 
 func main() {
@@ -64,9 +64,12 @@ func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slo
 	if err != nil {
 		return err
 	}
+	// No WriteTimeout: a blob GET streams the whole file, so the only
+	// write deadline is the client giving up.
 	srv := &http.Server{
 		Handler:           node.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	log.Info(events.NodeStart, "version", version, "node_id", cfg.NodeID, "addr", ln.Addr().String(),
 		"data_dir", cfg.DataDir, "coordinator", cfg.CoordinatorURL)

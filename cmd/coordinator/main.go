@@ -74,9 +74,12 @@ func serve(ctx context.Context, cfg config.CoordinatorConfig, ln net.Listener, l
 	}
 	c.Start(ctx)
 	defer c.Stop()
+	// No WriteTimeout: GET streams a whole object, so the only write
+	// deadline is the client giving up.
 	srv := &http.Server{
 		Handler:           c.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	log.Info(events.CoordinatorStart, "version", version, "addr", ln.Addr().String(),
 		"data_dir", cfg.DataDir, "heartbeat_timeout", cfg.HeartbeatTimeout)

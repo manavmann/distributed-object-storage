@@ -53,6 +53,9 @@ type Opts struct {
 	// RepairGrace is how long a node may be DOWN before its blobs are
 	// re-replicated. Default 1m.
 	RepairGrace time.Duration
+	// MaxUploads is how many PUTs the coordinator lets spool or replicate
+	// at once. Default 16.
+	MaxUploads int
 }
 
 // Cluster is a running coordinator plus its nodes. Its methods must be
@@ -123,6 +126,9 @@ func New(t *testing.T, opts Opts) *Cluster {
 	if opts.RepairGrace == 0 {
 		opts.RepairGrace = time.Minute
 	}
+	if opts.MaxUploads == 0 {
+		opts.MaxUploads = 16
+	}
 	transport := &http.Transport{MaxIdleConnsPerHost: idleConns}
 	t.Cleanup(transport.CloseIdleConnections)
 	c := &Cluster{
@@ -134,7 +140,7 @@ func New(t *testing.T, opts Opts) *Cluster {
 			Addr:             ":0",
 			DataDir:          t.TempDir(),
 			MaxObjectSize:    MaxObjectSize,
-			MaxUploads:       16,
+			MaxUploads:       opts.MaxUploads,
 			NodeTimeout:      opts.NodeRequestTimeout,
 			HeartbeatTimeout: opts.HeartbeatTimeout,
 			RF:               opts.RF,
@@ -198,8 +204,21 @@ func (c *Cluster) startCoordinator() {
 	coord.Start(context.Background())
 }
 
+// shutdownTimeout is how long a stopping coordinator waits for in-flight
+// requests, the same budget the binary gives SIGTERM.
+const shutdownTimeout = 30 * time.Second
+
+// stopCoordinator stops the coordinator the way SIGTERM does: the
+// listener closes and idle connections drop at once, requests already in
+// a handler run to completion, then the monitor and worker stop.
 func (c *Cluster) stopCoordinator() {
-	c.coordServer().Close()
+	srv := c.coordServer()
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Config.Shutdown(ctx); err != nil {
+		c.t.Errorf("coordinator shutdown: %v", err)
+	}
+	srv.Close()
 	c.coord.Stop()
 }
 
@@ -445,11 +464,16 @@ func (c *Cluster) CorruptBlob(i int, id string) {
 	}
 }
 
+// SpoolDir is the coordinator's upload spool directory.
+func (c *Cluster) SpoolDir() string {
+	return filepath.Join(c.cfg.DataDir, "spool")
+}
+
 // SpoolFiles lists the coordinator's in-flight upload spool. It is empty
 // whenever no PUT is in progress.
 func (c *Cluster) SpoolFiles() []string {
 	c.t.Helper()
-	entries, err := os.ReadDir(filepath.Join(c.cfg.DataDir, "spool"))
+	entries, err := os.ReadDir(c.SpoolDir())
 	if err != nil {
 		c.t.Fatalf("SpoolFiles: %v", err)
 	}

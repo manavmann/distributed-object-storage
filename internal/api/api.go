@@ -82,7 +82,7 @@ type putResponse struct {
 //	PUT    /v1/{bucket}           201 created | 400 | 409 exists
 //	GET    /v1/{bucket}           200 {name,created_at,object_count} | 400 | 404
 //	GET    /v1/{bucket}/          200 listing; ?prefix=&limit=&start_after= | 400 | 404
-//	PUT    /v1/{bucket}/{key...}  200 stored  | 400 | 404 no bucket | 411 | 413 | 503 InsufficientReplicas
+//	PUT    /v1/{bucket}/{key...}  200 stored  | 400 | 404 no bucket | 411 | 413 | 503 InsufficientReplicas TooManyUploads
 //	GET    /v1/{bucket}/{key...}  200 payload, X-Cairn-Replica | 400 | 404 | 503 NoHealthyReplica
 //	HEAD   /v1/{bucket}/{key...}  200 same headers, no body | 400 | 404 | 503 NoHealthyReplica
 //	DELETE /v1/{bucket}/{key...}  204 | 400 | 404 no bucket
@@ -270,10 +270,13 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxSize)
 
+	// The wait for a slot is bounded by the request itself: a client that
+	// gives up while queued is told why, and nothing was created for it.
 	select {
 	case s.uploads <- struct{}{}:
 		defer func() { <-s.uploads }()
 	case <-r.Context().Done():
+		s.writeError(w, r, fmt.Errorf("%w: %w", ErrTooManyUploads, r.Context().Err()))
 		return
 	}
 

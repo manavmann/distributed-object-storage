@@ -448,3 +448,52 @@ func TestClusterStatusShape(t *testing.T) {
 		t.Errorf("last_seen %s is not an RFC3339 time: %v", n["last_seen"], err)
 	}
 }
+
+func TestUploadSlotWaitCancelled(t *testing.T) {
+	c := testcluster.New(t, testcluster.Opts{Nodes: 1, RF: 1, W: 1, MaxUploads: 1})
+	createBucket(t, c, "bkt")
+
+	// A PUT whose body never finishes holds the only slot.
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest(http.MethodPut, c.Client().URL()+"/v1/bkt/held", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = 2
+	errc := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		errc <- err
+	}()
+	if _, err := pw.Write([]byte("h")); err != nil {
+		t.Fatal(err)
+	}
+	testcluster.WaitFor(t, func() bool { return len(c.SpoolFiles()) == 1 }, "held PUT to take the slot")
+
+	// The queued PUT's request ends before a slot frees up.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	queued := httptest.NewRequest(http.MethodPut, "/v1/bkt/queued", bytes.NewReader([]byte("x"))).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	c.Coordinator().Handler().ServeHTTP(rec, queued)
+	if rec.Code != http.StatusServiceUnavailable || errCode(t, rec.Body.Bytes()) != "TooManyUploads" {
+		t.Fatalf("queued PUT = %d %s, want 503 TooManyUploads", rec.Code, rec.Body)
+	}
+	if files := c.SpoolFiles(); len(files) != 1 {
+		t.Fatalf("spool = %v after a refused PUT, want only the held one", files)
+	}
+	if _, err := c.Meta().GetObject(context.Background(), "bkt", "queued"); !errors.Is(err, meta.ErrNoSuchKey) {
+		t.Fatalf("refused PUT left an object: %v", err)
+	}
+
+	if _, err := pw.Write([]byte("d")); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	if err := <-errc; err != nil {
+		t.Fatalf("held PUT: %v", err)
+	}
+}

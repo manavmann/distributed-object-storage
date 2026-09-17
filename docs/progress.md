@@ -1,7 +1,7 @@
 # Progress
 
 ## State
-Done: C1–C21. C21: concurrency + restart integration suites (6 tests, test/integration/{concurrency,restart}_test.go); harness gained RawDB/Blobs/QuarantineCount and a goroutine-safe Client.
+Done: C1–C21. C21: concurrency + restart integration suites (test/integration/{concurrency,restart}_test.go); harness gained RawDB/Blobs/QuarantineCount and a goroutine-safe Client; pre-existing tests moved to 50/300ms heartbeats and 1s node timeouts.
 Next: C22 — (next roadmap item)
 
 ## Hours ledger
@@ -27,4 +27,5 @@ Next: C22 — (next roadmap item)
 | C18 | | | meta+api+coordinator+integration -race clean; sweep runs only at startup, so an intent younger than 2× timeout at restart waits for the next restart; sweep fans out to every `nodes` row since nobody recorded which nodes the blob reached, GC treats "already gone" as done; StartedAt is caller-supplied so tests can seed a stale intent without a clock hook; `git stash` on this box rewrites touched files to CRLF (autocrlf=true) and trips gofmt — `gofmt -w` on them fixes it |
 | C19 | | | meta+repair+integration -race clean; the trimmed copy is always the spare in practice (PUT and repair both rank by key, so the restarted original holder outranks the repair target); TrimReplica re-checks the UP count inside the tx so a node going DOWN between fetch and commit cannot push a blob below RF; a DOWN holder is never the victim, only UP copies are trimmed |
 | C20 | | | all pkgs -race clean; one Metrics struct serves both binaries (coordinator gauges sit at 0 on a node); nodes_up/total refresh on transitions, DB gauges only at the end of a repair tick so objects_total lags a PUT by one tick; the monitor can mark a node DOWN between a tick's repair step and its gauge refresh, so a grace skip may land one tick after the gauge moves; -race works locally now (gcc via WinLibs) |
-| C21 | | | new tests -race -count=10 alone: 37.6s, 0 flakes; whole package on Windows does NOT meet <60s/zero-flake — pre-existing tests with 20ms heartbeats / 100ms node timeouts flap DOWN under a saturated -race run (old suite alone flakes at -count=10 and churns ~9k TIME_WAIT sockets); RestartCoordinator used to re-open the store on a live node (deletes in-flight .tmp); the heartbeat client's timeout equals its interval, so 20ms beats miss under load |
+| C21 | | | integration -race -count=10 in 55.8s, 0 flakes; 20ms heartbeats / 100ms node timeouts flapped healthy nodes DOWN once the package ran under load (heartbeat client timeout = its interval); RestartCoordinator used to open a second Store on a live node dir (Open deletes in-flight .tmp files); cluster teardown leaves ~30 TIME_WAIT sockets each, ~11k per -count=10 run vs Windows' 16k ephemeral range, so don't add clusters casually; wall time is fsync-bound (heartbeat/tick rate made no difference in A/B) |
+

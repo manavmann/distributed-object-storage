@@ -18,13 +18,21 @@ const (
 // if it never returns true. It is the replacement for time.Sleep in tests.
 func WaitFor(t *testing.T, cond func() bool, msg string) {
 	t.Helper()
+	if !Poll(cond) {
+		t.Fatalf("timed out after %s waiting for %s", waitTimeout, msg)
+	}
+}
+
+// Poll is WaitFor for a goroutine that may not fail the test: it reports
+// whether cond returned true within the same budget.
+func Poll(cond func() bool) bool {
 	deadline := time.Now().Add(waitTimeout)
 	for {
 		if cond() {
-			return
+			return true
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", waitTimeout, msg)
+			return false
 		}
 		time.Sleep(waitPoll)
 	}

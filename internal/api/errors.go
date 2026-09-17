@@ -27,6 +27,9 @@ var (
 	// ErrInsufficientReplicas means a PUT could not be stored on enough
 	// nodes to be committed.
 	ErrInsufficientReplicas = errors.New("api: insufficient replicas")
+	// ErrTooManyUploads means a PUT's request ended while it was still
+	// waiting for an upload slot.
+	ErrTooManyUploads = errors.New("api: too many concurrent uploads")
 )
 
 // statusFor is the single place an error becomes an HTTP status and code.
@@ -38,7 +41,7 @@ var (
 //	411 LengthRequired
 //	413 EntityTooLarge
 //	500 InternalError
-//	503 InsufficientReplicas NoHealthyReplica
+//	503 InsufficientReplicas NoHealthyReplica TooManyUploads
 func statusFor(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrInvalidBucket):
@@ -57,6 +60,8 @@ func statusFor(err error) (int, string) {
 		return http.StatusBadRequest, "IncompleteBody"
 	case errors.Is(err, ErrInsufficientReplicas):
 		return http.StatusServiceUnavailable, "InsufficientReplicas"
+	case errors.Is(err, ErrTooManyUploads):
+		return http.StatusServiceUnavailable, "TooManyUploads"
 	case errors.Is(err, replication.ErrNoHealthyReplica):
 		return http.StatusServiceUnavailable, "NoHealthyReplica"
 	case errors.Is(err, meta.ErrNoSuchBucket):
