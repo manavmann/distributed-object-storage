@@ -25,8 +25,9 @@ import (
 const (
 	// monitorTick is how often the health monitor looks for silent nodes.
 	monitorTick = time.Second
-	// gcBatchSize is how many queued deletes one repair tick works through.
-	gcBatchSize = 64
+	// batchSize is how many queued deletes, and how many under-replicated
+	// blobs, one repair tick works through.
+	batchSize = 64
 )
 
 // Deps are the parts the coordinator uses but does not own.
@@ -69,7 +70,8 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 			Registry:  nodes,
 			Interval:  cfg.RepairInterval,
 			Grace:     cfg.RepairGrace,
-			BatchSize: gcBatchSize,
+			RF:        cfg.RF,
+			BatchSize: batchSize,
 			Timeout:   cfg.NodeTimeout,
 			Log:       deps.Log,
 		},
@@ -116,4 +118,9 @@ func (c *Coordinator) Stop() {
 	}
 	c.stop()
 	c.done.Wait()
+}
+
+// Worker is the repair/GC worker, for tests that read its counters.
+func (c *Coordinator) Worker() *repair.Worker {
+	return c.worker
 }

@@ -57,6 +57,7 @@ type Server struct {
 	spoolDir    string
 	maxSize     int64
 	nodeTimeout time.Duration
+	rf          int
 	uploads     chan struct{}
 	log         *slog.Logger
 }
@@ -83,7 +84,7 @@ type putResponse struct {
 //	DELETE /v1/{bucket}/{key...}  204 | 400 | 404 no bucket
 //	GET    /healthz               200
 //	POST   /internal/heartbeat    204 | 400 InvalidHeartbeat
-//	GET    /cluster/status        200 {nodes:[...],under_replicated}
+//	GET    /cluster/status        200 {nodes:[...],under_replicated: blobs with fewer than RF UP holders}
 //	GET    /cluster/locate        200 {blob_id,size,sha256,replicas,placement}; ?bucket=&key= | 400 | 404
 //
 // Every response carries X-Request-ID and every request is logged.
@@ -98,6 +99,7 @@ func NewHandler(cfg Config) http.Handler {
 		spoolDir:    cfg.SpoolDir,
 		maxSize:     cfg.MaxObjectSize,
 		nodeTimeout: cfg.NodeTimeout,
+		rf:          cfg.RF,
 		uploads:     make(chan struct{}, cfg.MaxUploads),
 		log:         cfg.Log,
 	}
@@ -147,8 +149,13 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
+	under, err := s.meta.CountUnderReplicated(r.Context(), s.rf)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	all := s.nodes.All()
-	resp := statusResponse{Nodes: make([]statusNode, 0, len(all))}
+	resp := statusResponse{Nodes: make([]statusNode, 0, len(all)), UnderReplicated: under}
 	for _, n := range all {
 		resp.Nodes = append(resp.Nodes, statusNode{
 			NodeID: n.ID, Addr: n.Addr, Status: n.Status, FreeBytes: n.FreeBytes, BlobCount: n.BlobCount,

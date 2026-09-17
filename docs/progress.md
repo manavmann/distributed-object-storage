@@ -1,8 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C14. C14: compose scaled to node1..node4 (RF=3, W=2, heartbeat timeout 3s, repair env set); smoke.sh asserts 3 replicas via /cluster/locate, stops a holder, GET still matches sha256, DOWN→start→UP; README diagram + "How it works"; docs/architecture.md first draft.
-Next: C15 — (next roadmap item)
+Done: C1–C15. C15: internal/repair.Worker (one goroutine, tick → gc); pending_deletes drained via node DELETE with attempts back-off; meta.PendingDeletesForNodes/RemovePending/BumpAttempts; CAIRN_REPAIR_INTERVAL/GRACE now read by config; coordinator.Start runs monitor + worker.
+Next: C16 — (next roadmap item)
 
 ## Hours ledger
 | Item | Est | Actual | Notes |
@@ -21,3 +21,4 @@ Next: C15 — (next roadmap item)
 | C12 | replication+integration -race -count=3 in ~11s; W met → fallbacks skipped (N=3,W=2 with one bad target ends at 2 replicas, repair's job); commit-failure path now enqueues instead of inline Delete; hand-built configs must set RF/W or Validate rejects them |
 | C13 | integration -race -count=3 in 7.6s; HEAD now hits a node (full verify) and 503s like GET when no replica is reachable; a HEAD 503 has no body so the harness only sees the status; corrupt-copy rows are dropped, not queued (node already quarantined the file) |
 | C14 | smoke PASS in ~6.5s: DOWN within 3s heartbeat timeout, UP <1s after start; CAIRN_ADVERTISE_ADDR must be a full URL (config rejects nodeN:9000); CAIRN_REPAIR_INTERVAL/GRACE set in compose but not read by config until repair lands; smoke trap restarts a stopped node on failure |
+| C15 | repair+integration -race -count=3 in ~9s; Placement field omitted (placement is a stateless package), back-off filtered in the worker not SQL; harness RepairInterval defaults to 1m so pre-GC pending-count assertions stay exact; node DELETE quarantines rather than unlinks, so "reclaimed" = gone from blobs/, present in quarantine/ |

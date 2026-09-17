@@ -1,40 +1,50 @@
 // Package repair is the coordinator's background worker. One goroutine
 // ticks every Interval and works through the metadata store's queues; it
 // does nothing between ticks and never touches a blob that metadata has
-// not told it to. Its first duty is garbage collection: draining
-// pending_deletes by asking the holding node to quarantine each copy.
+// not told it to. Step 1 is garbage collection: draining pending_deletes
+// by asking the holding node to quarantine each copy. Step 2 is
+// re-replication: copying each blob that fewer than RF UP nodes hold onto
+// the node placement ranks first among the healthy non-holders.
 package repair
 
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
+	"github.com/manavmann/distributed-object-storage/internal/placement"
 )
 
 // warnAttempts is the failure count at which a queued delete is logged at
 // warn level instead of info: something about that node or blob is stuck.
 const warnAttempts = 5
 
-// Worker drains pending_deletes. Interval is the tick period and also the
-// unit of retry back-off: a row that has failed k times is left alone
-// until k×Interval after it was queued. Grace is the DOWN time a node is
-// allowed before its blobs are re-replicated; it is consumed by the
-// re-replication step. BatchSize bounds the rows one tick fetches, and
-// Timeout bounds each request to a node.
+// Worker drains pending_deletes and re-replicates under-replicated blobs.
+// Interval is the tick period and also the unit of retry back-off: a row
+// that has failed k times is left alone until k×Interval after it was
+// queued. Grace is the DOWN time a node is allowed before its blobs are
+// re-replicated. RF is how many UP holders every blob should have.
+// BatchSize bounds the rows one tick fetches for each step, and Timeout
+// bounds each request to a node.
 type Worker struct {
 	DB        *meta.DB
 	Client    *nodeclient.Client
 	Registry  *cluster.Registry
 	Interval  time.Duration
 	Grace     time.Duration
+	RF        int
 	BatchSize int
 	Timeout   time.Duration
 	Log       *slog.Logger
+
+	skippedNoSource atomic.Int64
 }
 
 // Run ticks every Interval until ctx is done. It is the worker's only
@@ -52,11 +62,31 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// tick is one pass of the worker: step 1 garbage-collects pending_deletes.
-// Re-replication of under-replicated objects (step 2) and the sweep of
-// stale pending_uploads (step 3) follow it once they exist.
+// SkippedNoSource is how many re-replication candidates have been skipped
+// because no UP node held a copy to read from.
+func (w *Worker) SkippedNoSource() int64 {
+	return w.skippedNoSource.Load()
+}
+
+// tick is one pass of the worker: step 1 garbage-collects pending_deletes,
+// step 2 re-replicates under-replicated blobs. The sweep of stale
+// pending_uploads (step 3) follows once it exists.
 func (w *Worker) tick(ctx context.Context) {
 	w.gc(ctx)
+	w.rereplicate(ctx)
+}
+
+// healthy is the registry's UP nodes as the ids placement ranks and the
+// addresses requests go to.
+func (w *Worker) healthy() (ids []string, addrs map[string]string) {
+	nodes := w.Registry.Healthy()
+	ids = make([]string, len(nodes))
+	addrs = make(map[string]string, len(nodes))
+	for i, n := range nodes {
+		ids[i] = n.ID
+		addrs[n.ID] = n.Addr
+	}
+	return ids, addrs
 }
 
 // gc fetches one batch of queued deletes whose node is UP and asks each
@@ -64,13 +94,7 @@ func (w *Worker) tick(ctx context.Context) {
 // Any other failure bumps the row's attempt count; the row is retried on
 // a later tick.
 func (w *Worker) gc(ctx context.Context) {
-	healthy := w.Registry.Healthy()
-	ids := make([]string, len(healthy))
-	addrs := make(map[string]string, len(healthy))
-	for i, n := range healthy {
-		ids[i] = n.ID
-		addrs[n.ID] = n.Addr
-	}
+	ids, addrs := w.healthy()
 	rows, err := w.DB.PendingDeletesForNodes(ctx, ids, w.BatchSize)
 	if err != nil {
 		w.Log.Error("gc_fetch_failed", "err", err)
@@ -111,4 +135,87 @@ func (w *Worker) deleteCopy(ctx context.Context, p meta.PendingDelete, addr stri
 		return
 	}
 	w.Log.Info("gc_deleted", "blob_id", p.BlobID, "node_id", p.NodeID, "already_gone", err != nil)
+}
+
+// rereplicate fetches one batch of blobs with fewer than RF UP holders and
+// copies each one, sequentially, onto one more node. A blob is skipped
+// while any of its DOWN holders went DOWN less than Grace ago (it may be
+// coming back) and when no UP holder can serve as the source. Failure on
+// one blob is logged and the loop moves on to the next.
+func (w *Worker) rereplicate(ctx context.Context) {
+	cands, err := w.DB.UnderReplicated(ctx, w.RF, w.BatchSize)
+	if err != nil {
+		w.Log.Error("repair_fetch_failed", "err", err)
+		return
+	}
+	if len(cands) == 0 {
+		return
+	}
+	ids, addrs := w.healthy()
+	now := time.Now()
+	for _, c := range cands {
+		if ctx.Err() != nil {
+			return
+		}
+		if c.LastDownChange != 0 && now.Sub(time.UnixMilli(c.LastDownChange)) < w.Grace {
+			w.Log.Info("repair_skipped", "blob_id", c.BlobID, "reason", "grace")
+			continue
+		}
+		var sources []meta.Replica
+		holding := make(map[string]bool, len(c.Holders))
+		for _, h := range c.Holders {
+			holding[h.NodeID] = true
+			if h.Status == cluster.StatusUp {
+				sources = append(sources, h)
+			}
+		}
+		if len(sources) == 0 {
+			w.skippedNoSource.Add(1)
+			w.Log.Warn("repair_skipped", "blob_id", c.BlobID, "reason", "no_source")
+			continue
+		}
+		ranked := placement.Rank(c.Key, ids)
+		i := slices.IndexFunc(ranked, func(id string) bool { return !holding[id] })
+		if i < 0 {
+			w.Log.Info("repair_skipped", "blob_id", c.BlobID, "reason", "no_target")
+			continue
+		}
+		target := ranked[i]
+		source := sources[rand.IntN(len(sources))]
+		w.copy(ctx, c, source, target, addrs[target])
+	}
+}
+
+// copy streams blob c from source to target and, if the object still
+// references the blob, records the new replica. If the object went away
+// while the copy was in flight the fresh copy is queued for deletion.
+func (w *Worker) copy(ctx context.Context, c meta.UnderReplicated, source meta.Replica, target, targetAddr string) {
+	start := time.Now()
+	w.Log.Info("repair_started", "blob_id", c.BlobID, "source", source.NodeID, "target", target)
+	reqCtx, cancel := context.WithTimeout(ctx, w.Timeout)
+	defer cancel()
+	blob, err := w.Client.Get(reqCtx, source.Addr, c.BlobID)
+	if err != nil {
+		w.Log.Error("repair_failed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", err)
+		return
+	}
+	defer blob.Close()
+	if err := w.Client.Put(reqCtx, targetAddr, c.BlobID, blob, blob.Length, blob.SHA256); err != nil {
+		w.Log.Error("repair_failed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", err)
+		return
+	}
+	added, err := w.DB.AddReplicaIfLive(ctx, c.BlobID, target)
+	if err != nil {
+		w.Log.Error("repair_commit_failed", "blob_id", c.BlobID, "target", target, "err", err)
+		return
+	}
+	if !added {
+		if err := w.DB.EnqueueDeletes(ctx, c.BlobID, []string{target}); err != nil {
+			w.Log.Error("repair_enqueue_failed", "blob_id", c.BlobID, "target", target, "err", err)
+			return
+		}
+		w.Log.Info("repair_skipped", "blob_id", c.BlobID, "target", target, "reason", "stale")
+		return
+	}
+	w.Log.Info("repair_completed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "duration", time.Since(start))
 }

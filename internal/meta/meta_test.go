@@ -483,3 +483,113 @@ func TestPendingDeletesQueue(t *testing.T) {
 		t.Fatalf("n1 after remove: %+v, %v", got, err)
 	}
 }
+
+func TestUnderReplicated(t *testing.T) {
+	db, _ := openTemp(t)
+	ctx := context.Background()
+	mustCreateBucket(t, db, "b")
+	mustUpsertNodes(t, db, "n1", "n2", "n3", "n4", "n5")
+	mustCommit(t, db, "b", "full", "blob-full", "n1", "n2", "n3")
+	mustCommit(t, db, "b", "short", "blob-short", "n1", "n2")
+	mustCommit(t, db, "b", "down", "blob-down", "n1", "n4", "n5")
+	mustCommit(t, db, "b", "none", "blob-none")
+	for _, id := range []string{"n4", "n5"} {
+		if err := db.SetNodeStatus(ctx, id, "DOWN"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var n4Changed, n5Changed int64
+	nodes, err := db.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		switch n.ID {
+		case "n4":
+			n4Changed = n.StatusChangedAt
+		case "n5":
+			n5Changed = n.StatusChangedAt
+		}
+	}
+
+	got, err := db.UnderReplicated(ctx, 3, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, u := range got {
+		ids = append(ids, u.BlobID)
+	}
+	if fmt.Sprint(ids) != "[blob-down blob-none blob-short]" {
+		t.Fatalf("UnderReplicated(3) = %v", ids)
+	}
+	down := got[0]
+	if down.Bucket != "b" || down.Key != "down" || down.Size != 1 || down.SHA256 != "x" {
+		t.Fatalf("object columns: %+v", down)
+	}
+	var holders []string
+	for _, h := range down.Holders {
+		holders = append(holders, h.NodeID+"="+h.Status+"@"+h.Addr)
+	}
+	if fmt.Sprint(holders) != "[n1=UP@http://n1 n4=DOWN@http://n4 n5=DOWN@http://n5]" {
+		t.Fatalf("holders of blob-down = %v", holders)
+	}
+	if down.LastDownChange != max(n4Changed, n5Changed) || down.LastDownChange == 0 {
+		t.Fatalf("LastDownChange = %d, want max(%d, %d)", down.LastDownChange, n4Changed, n5Changed)
+	}
+	if none := got[1]; len(none.Holders) != 0 || none.LastDownChange != 0 {
+		t.Fatalf("blob-none = %+v, want no holders and no DOWN change", none)
+	}
+	if short := got[2]; len(short.Holders) != 2 || short.LastDownChange != 0 {
+		t.Fatalf("blob-short = %+v, want 2 UP holders and no DOWN change", short)
+	}
+
+	if got, err = db.UnderReplicated(ctx, 3, 2); err != nil || len(got) != 2 {
+		t.Fatalf("limit 2: %d rows, %v", len(got), err)
+	}
+	if got, err = db.UnderReplicated(ctx, 2, 10); err != nil || len(got) != 2 || got[0].BlobID != "blob-down" || got[1].BlobID != "blob-none" {
+		t.Fatalf("UnderReplicated(2) = %+v, %v; want blob-down and blob-none", got, err)
+	}
+	if got, err = db.UnderReplicated(ctx, 1, 10); err != nil || len(got) != 1 || got[0].BlobID != "blob-none" {
+		t.Fatalf("UnderReplicated(1) = %+v, %v; want blob-none only", got, err)
+	}
+	if _, err = db.UnderReplicated(ctx, 3, 0); err == nil {
+		t.Fatal("limit 0 accepted")
+	}
+	for n, want := range map[int]int{3: 3, 2: 2, 1: 1, 0: 0} {
+		if c, err := db.CountUnderReplicated(ctx, n); err != nil || c != want {
+			t.Fatalf("CountUnderReplicated(%d) = %d, %v; want %d", n, c, err, want)
+		}
+	}
+}
+
+func TestAddReplicaIfLive(t *testing.T) {
+	db, _ := openTemp(t)
+	ctx := context.Background()
+	mustCreateBucket(t, db, "b")
+	mustUpsertNodes(t, db, "n1", "n2")
+	mustCommit(t, db, "b", "k", "blob-1", "n1")
+
+	if added, err := db.AddReplicaIfLive(ctx, "blob-1", "n2"); err != nil || !added {
+		t.Fatalf("AddReplicaIfLive(live) = %v, %v; want true", added, err)
+	}
+	if reps, err := db.Replicas(ctx, "blob-1"); err != nil || len(reps) != 2 {
+		t.Fatalf("Replicas after add = %+v, %v; want n1 and n2", reps, err)
+	}
+	if added, err := db.AddReplicaIfLive(ctx, "blob-1", "n2"); err != nil || added {
+		t.Fatalf("AddReplicaIfLive(duplicate) = %v, %v; want false", added, err)
+	}
+
+	if err := db.DeleteObject(ctx, "b", "k"); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := db.AddReplicaIfLive(ctx, "blob-1", "n2"); err != nil || added {
+		t.Fatalf("AddReplicaIfLive(deleted) = %v, %v; want false", added, err)
+	}
+	if reps, err := db.Replicas(ctx, "blob-1"); err != nil || len(reps) != 0 {
+		t.Fatalf("zombie replica rows after delete: %+v, %v", reps, err)
+	}
+	if added, err := db.AddReplicaIfLive(ctx, "never-committed", "n1"); err != nil || added {
+		t.Fatalf("AddReplicaIfLive(unknown blob) = %v, %v; want false", added, err)
+	}
+}

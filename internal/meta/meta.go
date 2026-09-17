@@ -389,7 +389,17 @@ func (d *DB) ListObjects(ctx context.Context, bucket, prefix, startAfter string,
 
 // Replicas returns the nodes that hold blobID, ordered by node id.
 func (d *DB) Replicas(ctx context.Context, blobID string) ([]Replica, error) {
-	rows, err := d.db.QueryContext(ctx, `
+	var out []Replica
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		out, err = replicasIn(ctx, tx, blobID)
+		return err
+	})
+	return out, err
+}
+
+func replicasIn(ctx context.Context, tx *sql.Tx, blobID string) ([]Replica, error) {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT r.blob_id, r.node_id, n.addr, n.status, r.created_at
 		FROM replicas r JOIN nodes n ON n.node_id = r.node_id
 		WHERE r.blob_id = ? ORDER BY r.node_id`, blobID)
@@ -576,4 +586,102 @@ func (d *DB) BumpAttempts(ctx context.Context, blobID, nodeID string) (int, erro
 		return 0, fmt.Errorf("meta: bump attempts %s on %s: %w", blobID, nodeID, err)
 	}
 	return n, nil
+}
+
+// UnderReplicated is one blob with fewer than n UP holders. Holders lists
+// every replica row of the blob, UP and DOWN; LastDownChange is the latest
+// status_changed_at among DOWN holders, or 0 if none is DOWN.
+type UnderReplicated struct {
+	BlobID         string
+	Bucket         string
+	Key            string
+	Size           int64
+	SHA256         string
+	Holders        []Replica
+	LastDownChange int64
+}
+
+// underReplicatedSQL selects the blob_id of every object with fewer than
+// n UP replicas. It takes n as its single parameter.
+const underReplicatedSQL = `
+	SELECT o.blob_id FROM objects o
+	LEFT JOIN replicas r ON r.blob_id = o.blob_id
+	LEFT JOIN nodes n ON n.node_id = r.node_id
+	GROUP BY o.blob_id
+	HAVING COALESCE(SUM(n.status = 'UP'), 0) < ?`
+
+// UnderReplicated returns up to limit blobs that fewer than n UP nodes
+// hold, ordered by blob id, each with all of its holders.
+func (d *DB) UnderReplicated(ctx context.Context, n, limit int) ([]UnderReplicated, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("meta: under-replicated: limit must be positive, got %d", limit)
+	}
+	var out []UnderReplicated
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT o.blob_id, o.bucket, o.key, o.size, o.sha256,
+				COALESCE(MAX(CASE WHEN n.status = 'DOWN' THEN n.status_changed_at END), 0)
+			FROM objects o
+			LEFT JOIN replicas r ON r.blob_id = o.blob_id
+			LEFT JOIN nodes n ON n.node_id = r.node_id
+			WHERE o.blob_id IN (`+underReplicatedSQL+`)
+			GROUP BY o.blob_id ORDER BY o.blob_id LIMIT ?`, n, limit)
+		if err != nil {
+			return fmt.Errorf("meta: under-replicated: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var u UnderReplicated
+			if err := rows.Scan(&u.BlobID, &u.Bucket, &u.Key, &u.Size, &u.SHA256, &u.LastDownChange); err != nil {
+				return fmt.Errorf("meta: under-replicated: %w", err)
+			}
+			out = append(out, u)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("meta: under-replicated: %w", err)
+		}
+		for i := range out {
+			out[i].Holders, err = replicasIn(ctx, tx, out[i].BlobID)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CountUnderReplicated returns how many blobs fewer than n UP nodes hold.
+func (d *DB) CountUnderReplicated(ctx context.Context, n int) (int, error) {
+	var c int
+	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+underReplicatedSQL+`)`, n).Scan(&c); err != nil {
+		return 0, fmt.Errorf("meta: count under-replicated: %w", err)
+	}
+	return c, nil
+}
+
+// AddReplicaIfLive records that nodeID holds blobID, but only if objects
+// still references blobID. It reports whether the row was inserted; a
+// row that already exists is not inserted again.
+func (d *DB) AddReplicaIfLive(ctx context.Context, blobID, nodeID string) (bool, error) {
+	var added bool
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO replicas (blob_id, node_id, created_at)
+			SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM objects WHERE blob_id = ?)
+			ON CONFLICT (blob_id, node_id) DO NOTHING`, blobID, nodeID, now(), blobID)
+		if err != nil {
+			return fmt.Errorf("meta: add replica %s on %s: %w", blobID, nodeID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("meta: add replica %s on %s: %w", blobID, nodeID, err)
+		}
+		added = n == 1
+		return nil
+	})
+	return added, err
 }

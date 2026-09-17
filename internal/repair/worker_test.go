@@ -1,11 +1,16 @@
 package repair
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
@@ -15,6 +20,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
+	"github.com/manavmann/distributed-object-storage/internal/storage"
 )
 
 // TestBatchSizeRespected queues five deletes on one node and checks that a
@@ -63,5 +69,95 @@ func TestBatchSizeRespected(t *testing.T) {
 			t.Fatalf("after tick %d: pending = %d, %v; want %d", tick, n, err, 5-wantSent)
 		}
 		wantSent = min(wantSent+2, 5)
+	}
+}
+
+// startNode serves a real storage node from a temp dir and returns its
+// URL wrapped by wrap, plus the dir for on-disk assertions.
+func startNode(t *testing.T, id string, wrap func(http.Handler) http.Handler) (url, dir string) {
+	t.Helper()
+	dir = t.TempDir()
+	sn, err := storage.NewNode(dir, storage.NodeOptions{ID: id, HeartbeatInterval: time.Minute, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(wrap(sn.Handler()))
+	t.Cleanup(srv.Close)
+	return srv.URL, dir
+}
+
+// TestRepairStaleCopyQueued deletes the object while its repair copy is
+// in flight (the target node deletes it before acknowledging the PUT), so
+// the commit must find the blob unreferenced, leave no replica row and
+// queue the fresh copy, which the next tick reclaims.
+func TestRepairStaleCopyQueued(t *testing.T) {
+	ctx := context.Background()
+	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	identity := func(h http.Handler) http.Handler { return h }
+	sourceURL, _ := startNode(t, "src", identity)
+	targetURL, targetDir := startNode(t, "dst", func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				if err := db.DeleteObject(ctx, "b", "k"); err != nil {
+					t.Errorf("delete during repair: %v", err)
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	reg, err := cluster.Load(ctx, db, time.Minute, time.Now, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, url := range map[string]string{"src": sourceURL, "dst": targetURL} {
+		if err := reg.Heartbeat(ctx, cluster.Heartbeat{NodeID: id, Addr: url}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := nodeclient.New()
+	payload := []byte("copy me")
+	sum := sha256.Sum256(payload)
+	const blobID = "blob-stale"
+	if err := client.Put(ctx, sourceURL, blobID, bytes.NewReader(payload), int64(len(payload)), hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateBucket(ctx, "b"); err != nil {
+		t.Fatal(err)
+	}
+	obj := meta.Object{Bucket: "b", Key: "k", BlobID: blobID, Size: int64(len(payload)), SHA256: hex.EncodeToString(sum[:])}
+	if err := db.CommitObject(ctx, obj, []string{"src"}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &Worker{
+		DB: db, Client: client, Registry: reg,
+		Interval: time.Minute, Grace: time.Millisecond, RF: 2, BatchSize: 8, Timeout: 5 * time.Second, Log: log,
+	}
+	w.tick(ctx)
+	if reps, err := db.Replicas(ctx, blobID); err != nil || len(reps) != 0 {
+		t.Fatalf("replica rows after stale repair = %+v, %v; want none", reps, err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "blobs", blobID)); err != nil {
+		t.Fatalf("target should hold the stale copy until GC: %v", err)
+	}
+	rows, err := db.PendingDeletesForNodes(ctx, []string{"dst"}, 10)
+	if err != nil || len(rows) != 1 || rows[0].BlobID != blobID {
+		t.Fatalf("pending deletes on dst = %+v, %v; want the stale copy", rows, err)
+	}
+
+	w.tick(ctx)
+	if n, err := db.CountPending(ctx); err != nil || n != 0 {
+		t.Fatalf("pending after gc = %d, %v; want 0", n, err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "blobs", blobID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale copy still served on target: %v", err)
+	}
+	if w.SkippedNoSource() != 0 {
+		t.Fatalf("no_source skips = %d, want 0", w.SkippedNoSource())
 	}
 }
