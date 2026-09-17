@@ -14,6 +14,8 @@ var (
 	ErrInvalidBucket = errors.New("api: invalid bucket name")
 	// ErrInvalidKey means the object key fails validateKey.
 	ErrInvalidKey = errors.New("api: invalid object key")
+	// ErrInvalidArgument means a query parameter fails parseListQuery.
+	ErrInvalidArgument = errors.New("api: invalid argument")
 	// ErrLengthRequired means a PUT arrived without a Content-Length.
 	ErrLengthRequired = errors.New("api: Content-Length required")
 	// ErrTooLarge means the declared or actual body exceeds the limit.
@@ -28,12 +30,23 @@ var (
 )
 
 // statusFor is the single place an error becomes an HTTP status and code.
+// The public table:
+//
+//	400 InvalidBucket InvalidKey InvalidArgument IncompleteBody
+//	404 NoSuchBucket NoSuchKey
+//	409 BucketAlreadyExists BucketNotEmpty
+//	411 LengthRequired
+//	413 EntityTooLarge
+//	500 InternalError
+//	503 InsufficientReplicas NoHealthyReplica
 func statusFor(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrInvalidBucket):
 		return http.StatusBadRequest, "InvalidBucket"
 	case errors.Is(err, ErrInvalidKey):
 		return http.StatusBadRequest, "InvalidKey"
+	case errors.Is(err, ErrInvalidArgument):
+		return http.StatusBadRequest, "InvalidArgument"
 	case errors.Is(err, ErrLengthRequired):
 		return http.StatusLengthRequired, "LengthRequired"
 	case errors.Is(err, ErrTooLarge):

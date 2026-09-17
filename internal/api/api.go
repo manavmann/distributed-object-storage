@@ -65,6 +65,8 @@ type putResponse struct {
 // NewHandler serves the coordinator API:
 //
 //	PUT    /v1/{bucket}           201 created | 400 | 409 exists
+//	GET    /v1/{bucket}           200 {name,created_at,object_count} | 400 | 404
+//	GET    /v1/{bucket}/          200 listing; ?prefix=&limit=&start_after= | 400 | 404
 //	PUT    /v1/{bucket}/{key...}  200 stored  | 400 | 404 no bucket | 411 | 413 | 503 InsufficientReplicas
 //	GET    /v1/{bucket}/{key...}  200 payload | 400 | 404 | 503 NoHealthyReplica
 //	HEAD   /v1/{bucket}/{key...}  200 headers from metadata | 400 | 404
@@ -85,6 +87,7 @@ func NewHandler(cfg Config) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /v1/{bucket}", s.handlePutBucket)
+	mux.HandleFunc("GET /v1/{bucket}", s.handleGetBucket)
 	mux.HandleFunc("PUT /v1/{bucket}/{key...}", s.handlePutObject)
 	mux.HandleFunc("GET /v1/{bucket}/{key...}", s.handleGetObject)
 	mux.HandleFunc("DELETE /v1/{bucket}/{key...}", s.handleDeleteObject)
@@ -196,10 +199,95 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// bucketResponse is the body of GET /v1/{bucket}.
+type bucketResponse struct {
+	Name        string `json:"name"`
+	CreatedAt   string `json:"created_at"`
+	ObjectCount int    `json:"object_count"`
+}
+
+func (s *Server) handleGetBucket(w http.ResponseWriter, r *http.Request) {
+	bucket := r.PathValue("bucket")
+	if err := validateBucket(bucket); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	b, err := s.meta.GetBucket(r.Context(), bucket)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	// Counted by paging through the listing so meta needs no count method.
+	count, startAfter := 0, ""
+	for {
+		objs, truncated, err := s.meta.ListObjects(r.Context(), bucket, "", startAfter, maxListLimit)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		count += len(objs)
+		if !truncated {
+			break
+		}
+		startAfter = objs[len(objs)-1].Key
+	}
+	httpx.WriteJSON(w, http.StatusOK, bucketResponse{
+		Name: b.Name, CreatedAt: time.UnixMilli(b.CreatedAt).UTC().Format(time.RFC3339Nano), ObjectCount: count,
+	})
+}
+
+// listEntry is one object in a listing.
+type listEntry struct {
+	Key          string `json:"key"`
+	Size         int64  `json:"size"`
+	ETag         string `json:"etag"`
+	ContentType  string `json:"content_type"`
+	LastModified string `json:"last_modified"`
+}
+
+// listResponse is the body of GET /v1/{bucket}/. Objects is never null.
+type listResponse struct {
+	Objects        []listEntry `json:"objects"`
+	Truncated      bool        `json:"truncated"`
+	NextStartAfter string      `json:"next_start_after"`
+}
+
+func (s *Server) handleListObjects(w http.ResponseWriter, r *http.Request, bucket string) {
+	lq, err := parseListQuery(r.URL.Query())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	objs, truncated, err := s.meta.ListObjects(r.Context(), bucket, lq.Prefix, lq.StartAfter, lq.Limit)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	resp := listResponse{Objects: make([]listEntry, 0, len(objs)), Truncated: truncated}
+	for _, o := range objs {
+		resp.Objects = append(resp.Objects, listEntry{
+			Key:          o.Key,
+			Size:         o.Size,
+			ETag:         `"` + o.SHA256 + `"`,
+			ContentType:  o.ContentType,
+			LastModified: time.UnixMilli(o.CreatedAt).UTC().Format(time.RFC3339Nano),
+		})
+	}
+	if truncated {
+		resp.NextStartAfter = objs[len(objs)-1].Key
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	bucket, key := r.PathValue("bucket"), r.PathValue("key")
 	if err := validateBucket(bucket); err != nil {
 		s.writeError(w, r, err)
+		return
+	}
+	// GET /v1/{bucket}/ is the listing; the empty key is invalid elsewhere.
+	if key == "" {
+		s.handleListObjects(w, r, bucket)
 		return
 	}
 	if err := validateKey(key); err != nil {

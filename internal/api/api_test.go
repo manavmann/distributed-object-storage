@@ -447,6 +447,7 @@ func TestStatusFor(t *testing.T) {
 	}{
 		{ErrInvalidBucket, 400, "InvalidBucket"},
 		{ErrInvalidKey, 400, "InvalidKey"},
+		{ErrInvalidArgument, 400, "InvalidArgument"},
 		{ErrLengthRequired, 411, "LengthRequired"},
 		{ErrTooLarge, 413, "EntityTooLarge"},
 		{ErrBodyRead, 400, "IncompleteBody"},
