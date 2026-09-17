@@ -1,8 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C21. C21: concurrency + restart integration suites (test/integration/{concurrency,restart}_test.go); harness gained RawDB/Blobs/QuarantineCount and a goroutine-safe Client; pre-existing tests moved to 50/300ms heartbeats and 1s node timeouts.
-Next: C22 — (next roadmap item)
+Done: C1–C22. C22: lifecycle/limits hardening — IdleTimeout 120s on both servers, node shutdown 30s, 503 TooManyUploads when a queued PUT's ctx ends; harness stops the coordinator via Server.Shutdown; test/integration/lifecycle_test.go (5 tests) + TestUploadSlotWaitCancelled.
+Next: C23 — (next roadmap item)
 
 ## Hours ledger
 | Item | Est | Actual | Notes |
@@ -28,4 +28,5 @@ Next: C22 — (next roadmap item)
 | C19 | | | meta+repair+integration -race clean; the trimmed copy is always the spare in practice (PUT and repair both rank by key, so the restarted original holder outranks the repair target); TrimReplica re-checks the UP count inside the tx so a node going DOWN between fetch and commit cannot push a blob below RF; a DOWN holder is never the victim, only UP copies are trimmed |
 | C20 | | | all pkgs -race clean; one Metrics struct serves both binaries (coordinator gauges sit at 0 on a node); nodes_up/total refresh on transitions, DB gauges only at the end of a repair tick so objects_total lags a PUT by one tick; the monitor can mark a node DOWN between a tick's repair step and its gauge refresh, so a grace skip may land one tick after the gauge moves; -race works locally now (gcc via WinLibs) |
 | C21 | | | integration -race -count=10 in 55.8s, 0 flakes; 20ms heartbeats / 100ms node timeouts flapped healthy nodes DOWN once the package ran under load (heartbeat client timeout = its interval); RestartCoordinator used to open a second Store on a live node dir (Open deletes in-flight .tmp files); cluster teardown leaves ~30 TIME_WAIT sockets each, ~11k per -count=10 run vs Windows' 16k ephemeral range, so don't add clusters casually; wall time is fsync-bound (heartbeat/tick rate made no difference in A/B) |
+| C22 | | | api+integration+cmd -race clean, new tests -count=5 clean; most of the item already existed (ReadHeaderTimeout, Shutdown→Stop→Close order, spool sweep, 413-before-read, short body→400) so the real gaps were IdleTimeout, node 30s drain, and the silent return on a cancelled slot wait; "requests refused during shutdown" must use a fresh connection per request — an idle keep-alive conn can still be served for ~1ms after the listener closes; a short body cannot be sent through net/http's client (it refuses ContentLength≠body), so that test writes raw HTTP over a TCPConn and half-closes; env var stays CAIRN_MAX_UPLOADS (item says MAX_CONCURRENT_UPLOADS), driven as Opts.MaxUploads in the harness |
 

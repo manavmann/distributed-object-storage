@@ -30,5 +30,5 @@ smoke:
 demo:
 	@echo "demo: not implemented yet"
 
-bench:
-	@echo "bench: not implemented yet"
+bench: build
+	bash scripts/bench.sh
