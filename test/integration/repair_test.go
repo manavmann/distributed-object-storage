@@ -19,7 +19,7 @@ func repairCluster(t *testing.T, grace, nodeTimeout time.Duration) *testcluster.
 	t.Helper()
 	c := testcluster.New(t, testcluster.Opts{
 		Nodes: 4, RF: 3, W: 2, NodeRequestTimeout: nodeTimeout,
-		HeartbeatInterval: 20 * time.Millisecond, HeartbeatTimeout: 100 * time.Millisecond,
+		HeartbeatInterval: fastHeartbeat, HeartbeatTimeout: fastHeartbeatTimeout,
 		RepairInterval: gcInterval, RepairGrace: grace,
 	})
 	if err := c.Client().CreateBucket("bkt"); err != nil {
@@ -176,7 +176,7 @@ func TestRestartWithinGraceNoRepair(t *testing.T) {
 
 func TestRepairVsDeleteHangWrites(t *testing.T) {
 	t.Parallel()
-	c := repairCluster(t, time.Millisecond, 300*time.Millisecond)
+	c := repairCluster(t, time.Millisecond, nodeTimeout)
 	cl := c.Client()
 	blobID, holders, spare := putOnThree(t, c, "k")
 	c.HangWrites(spare, true)

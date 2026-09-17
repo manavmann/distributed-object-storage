@@ -14,8 +14,8 @@ import (
 )
 
 // Client is a typed client for the coordinator API. It always addresses
-// the cluster's current coordinator, so it stays valid across
-// RestartCoordinator.
+// the cluster's current coordinator, so it stays valid across, and may be
+// used from other goroutines during, RestartCoordinator.
 type Client struct {
 	c *Cluster
 }
@@ -90,21 +90,21 @@ type Status struct {
 
 // URL is the coordinator's current base URL.
 func (cl *Client) URL() string {
-	return cl.c.srv.URL
+	return cl.c.coordURL()
 }
 
 // Do sends method to path with body and optional header pairs and returns
 // the response with its body fully read. Any status is returned as-is; it
 // is the escape hatch for requests the typed methods cannot express.
 func (cl *Client) Do(method, path string, body io.Reader, hdr ...string) (*http.Response, []byte, error) {
-	req, err := http.NewRequest(method, cl.URL()+path, body)
+	req, err := http.NewRequest(method, cl.c.coordURL()+path, body)
 	if err != nil {
 		return nil, nil, err
 	}
 	for i := 0; i+1 < len(hdr); i += 2 {
 		req.Header.Set(hdr[i], hdr[i+1])
 	}
-	resp, err := cl.c.srv.Client().Do(req)
+	resp, err := cl.c.http.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}

@@ -116,7 +116,7 @@ func TestQuorumWithDownNodes(t *testing.T) {
 	const nodes = 4
 	c := testcluster.New(t, testcluster.Opts{
 		Nodes: nodes, RF: 3, W: 2,
-		HeartbeatInterval: 20 * time.Millisecond, HeartbeatTimeout: 100 * time.Millisecond,
+		HeartbeatInterval: fastHeartbeat, HeartbeatTimeout: fastHeartbeatTimeout,
 	})
 	cl := c.Client()
 	if err := cl.CreateBucket("bkt"); err != nil {
@@ -162,7 +162,7 @@ func TestQuorumWithDownNodes(t *testing.T) {
 
 func TestHungNodeIsNotRecorded(t *testing.T) {
 	t.Parallel()
-	const timeout = 300 * time.Millisecond
+	const timeout = nodeTimeout
 	c := testcluster.New(t, testcluster.Opts{Nodes: 3, RF: 3, W: 2, NodeRequestTimeout: timeout})
 	cl := c.Client()
 	if err := cl.CreateBucket("bkt"); err != nil {

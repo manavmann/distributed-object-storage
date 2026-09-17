@@ -15,6 +15,23 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/testcluster"
 )
 
+// fastHeartbeat and fastHeartbeatTimeout are the heartbeat settings of the
+// tests that need a killed node marked DOWN quickly. A node's heartbeat
+// POST times out after one interval, and the coordinator's heartbeat
+// handler shares the metadata connection with every PUT commit, so a
+// shorter interval has healthy nodes flapping DOWN when the whole package
+// runs in parallel under -race. Six missed beats mark a node DOWN; the
+// monitor sweeps once a second regardless.
+const (
+	fastHeartbeat        = 50 * time.Millisecond
+	fastHeartbeatTimeout = 300 * time.Millisecond
+)
+
+// nodeTimeout is the node request timeout of the tests that need a hung
+// node given up on: long enough that a loaded machine never trips it on a
+// healthy node, short enough to fit inside WaitFor's budget.
+const nodeTimeout = time.Second
+
 // nodeStatus returns node id's entry in /cluster/status, or false if the
 // coordinator does not list it.
 func nodeStatus(t *testing.T, c *testcluster.Cluster, id string) (testcluster.NodeStatus, bool) {
@@ -106,7 +123,7 @@ func TestStartPutGet(t *testing.T) {
 func TestKillAndRestartNode(t *testing.T) {
 	t.Parallel()
 	c := testcluster.New(t, testcluster.Opts{
-		Nodes: 2, HeartbeatInterval: 20 * time.Millisecond, HeartbeatTimeout: 100 * time.Millisecond,
+		Nodes: 2, HeartbeatInterval: fastHeartbeat, HeartbeatTimeout: fastHeartbeatTimeout,
 	})
 	cl := c.Client()
 	if err := cl.CreateBucket("bkt"); err != nil {
@@ -214,7 +231,7 @@ func TestCoordinatorRestartKeepsObjects(t *testing.T) {
 
 func TestFaultFlags(t *testing.T) {
 	t.Parallel()
-	c := testcluster.New(t, testcluster.Opts{Nodes: 1, NodeRequestTimeout: 100 * time.Millisecond, RF: 1, W: 1})
+	c := testcluster.New(t, testcluster.Opts{Nodes: 1, NodeRequestTimeout: nodeTimeout, RF: 1, W: 1})
 	cl := c.Client()
 	if err := cl.CreateBucket("bkt"); err != nil {
 		t.Fatal(err)
@@ -240,7 +257,7 @@ func TestFaultFlags(t *testing.T) {
 	if _, err := cl.Put("bkt", "k", []byte("y"), ""); !errors.As(err, &apiErr) || apiErr.Code != "InsufficientReplicas" {
 		t.Fatalf("put with HangWrites = %v", err)
 	}
-	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+	if elapsed := time.Since(start); elapsed < nodeTimeout {
 		t.Fatalf("hung put returned after %s, before the node timeout", elapsed)
 	}
 	c.HangWrites(0, false)

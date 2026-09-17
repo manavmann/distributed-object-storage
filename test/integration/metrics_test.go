@@ -135,7 +135,7 @@ func TestUnderReplicatedGaugeMovesAfterKill(t *testing.T) {
 	t.Parallel()
 	c := testcluster.New(t, testcluster.Opts{
 		Nodes: 3, RF: 3, W: 2,
-		HeartbeatInterval: 20 * time.Millisecond, HeartbeatTimeout: 100 * time.Millisecond,
+		HeartbeatInterval: fastHeartbeat, HeartbeatTimeout: fastHeartbeatTimeout,
 		RepairInterval: gcInterval, RepairGrace: time.Minute,
 	})
 	cl := c.Client()

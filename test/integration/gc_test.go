@@ -107,7 +107,7 @@ func TestDeleteWithKilledHolderReclaimedAfterRestart(t *testing.T) {
 	t.Parallel()
 	const nodes = 3
 	c := gcCluster(t, nodes, testcluster.Opts{
-		HeartbeatInterval: 20 * time.Millisecond, HeartbeatTimeout: 100 * time.Millisecond,
+		HeartbeatInterval: fastHeartbeat, HeartbeatTimeout: fastHeartbeatTimeout,
 	})
 	cl := c.Client()
 	if _, err := cl.Put("bkt", "k", []byte("held"), ""); err != nil {

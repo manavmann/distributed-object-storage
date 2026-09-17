@@ -2,15 +2,19 @@ package testcluster
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,8 +56,8 @@ type Opts struct {
 }
 
 // Cluster is a running coordinator plus its nodes. Its methods must be
-// called from the test goroutine; the fault switches are the exception and
-// may be flipped at any time.
+// called from the test goroutine; the fault switches and Client are the
+// exceptions and may be used from any goroutine at any time.
 type Cluster struct {
 	t     *testing.T
 	log   *slog.Logger
@@ -61,9 +65,21 @@ type Cluster struct {
 	cfg   config.CoordinatorConfig
 	meta  *meta.DB
 	coord *coordinator.Coordinator
-	srv   *httptest.Server
 	nodes []*node
+	raw   *sql.DB
+	// http is what Client sends with. It keeps enough idle connections
+	// for the concurrency tests' goroutines so a test does not churn a
+	// connection per request and run Windows out of ephemeral ports.
+	http *http.Client
+
+	// srvMu guards srv, which RestartCoordinator swaps while Client calls
+	// from load goroutines may be reading it.
+	srvMu sync.RWMutex
+	srv   *httptest.Server
 }
+
+// idleConns is how many idle connections the test client keeps per host.
+const idleConns = 64
 
 // node is one storage node and the harness state around it. dir and id
 // outlive Kill so Restart brings the same node back.
@@ -72,6 +88,7 @@ type node struct {
 	dir    string
 	faults faults
 
+	sn            *storage.Node
 	srv           *httptest.Server
 	stopHeartbeat context.CancelFunc
 	heartbeatDone <-chan struct{}
@@ -106,10 +123,13 @@ func New(t *testing.T, opts Opts) *Cluster {
 	if opts.RepairGrace == 0 {
 		opts.RepairGrace = time.Minute
 	}
+	transport := &http.Transport{MaxIdleConnsPerHost: idleConns}
+	t.Cleanup(transport.CloseIdleConnections)
 	c := &Cluster{
 		t:    t,
 		log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		opts: opts,
+		http: &http.Client{Transport: transport},
 		cfg: config.CoordinatorConfig{
 			Addr:             ":0",
 			DataDir:          t.TempDir(),
@@ -172,13 +192,27 @@ func (c *Cluster) startCoordinator() {
 		c.t.Fatal(err)
 	}
 	c.coord = coord
+	c.srvMu.Lock()
 	c.srv = httptest.NewServer(coord.Handler())
+	c.srvMu.Unlock()
 	coord.Start(context.Background())
 }
 
 func (c *Cluster) stopCoordinator() {
-	c.srv.Close()
+	c.coordServer().Close()
 	c.coord.Stop()
+}
+
+// coordServer is the coordinator's current httptest server.
+func (c *Cluster) coordServer() *httptest.Server {
+	c.srvMu.RLock()
+	defer c.srvMu.RUnlock()
+	return c.srv
+}
+
+// coordURL is the current coordinator's base URL.
+func (c *Cluster) coordURL() string {
+	return c.coordServer().URL
 }
 
 // startNode opens n's directory, serves it and starts its heartbeat loop
@@ -191,14 +225,16 @@ func (c *Cluster) startNode(n *node) {
 	if err != nil {
 		c.t.Fatal(err)
 	}
+	n.sn = sn
 	n.srv = httptest.NewServer(n.faults.wrap(sn.Handler()))
-	c.startHeartbeat(n, sn)
+	c.startHeartbeat(n)
 }
 
-func (c *Cluster) startHeartbeat(n *node, sn *storage.Node) {
+// startHeartbeat points n's running node at the current coordinator.
+func (c *Cluster) startHeartbeat(n *node) {
 	ctx, cancel := context.WithCancel(context.Background())
 	n.stopHeartbeat = cancel
-	n.heartbeatDone = sn.StartHeartbeat(ctx, c.srv.URL, n.srv.URL)
+	n.heartbeatDone = n.sn.StartHeartbeat(ctx, c.coordServer().URL, n.srv.URL)
 }
 
 func (c *Cluster) stopHeartbeat(n *node) {
@@ -249,13 +285,7 @@ func (c *Cluster) RestartCoordinator() {
 			continue
 		}
 		c.stopHeartbeat(n)
-		sn, err := storage.NewNode(n.dir, storage.NodeOptions{
-			ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval, Metrics: metrics.New(), Log: c.log,
-		})
-		if err != nil {
-			c.t.Fatal(err)
-		}
-		c.startHeartbeat(n, sn)
+		c.startHeartbeat(n)
 	}
 }
 
@@ -273,6 +303,31 @@ func (c *Cluster) Coordinator() *coordinator.Coordinator {
 // Meta is the coordinator's metadata store.
 func (c *Cluster) Meta() *meta.DB {
 	return c.meta
+}
+
+// RawDB is a second connection to the metadata file, for tests that need
+// to inspect rows across tables. It is for SELECTs only: the coordinator's
+// own connection stays the sole writer. It outlives RestartCoordinator and
+// is closed with the cluster.
+func (c *Cluster) RawDB() *sql.DB {
+	c.t.Helper()
+	if c.raw != nil {
+		return c.raw
+	}
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	db, err := sql.Open("sqlite", filepath.Join(c.cfg.DataDir, "meta.db")+"?"+q.Encode())
+	if err != nil {
+		c.t.Fatalf("RawDB: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	c.t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			c.t.Errorf("close raw db: %v", err)
+		}
+	})
+	c.raw = db
+	return db
 }
 
 // NodeID is the id node i reports in heartbeats.
@@ -325,6 +380,34 @@ func (c *Cluster) HasBlob(i int, id string) bool {
 	}
 	c.t.Fatalf("HasBlob(%d, %s): %v", i, id, err)
 	return false
+}
+
+// Blobs lists the ids node i has committed under blobs/, skipping the
+// dot-prefixed spool files of writes in flight. It works whether or not
+// the node is running.
+func (c *Cluster) Blobs(i int) []string {
+	c.t.Helper()
+	entries, err := os.ReadDir(filepath.Join(c.nodes[i].dir, "blobs"))
+	if err != nil {
+		c.t.Fatalf("Blobs(%d): %v", i, err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".") {
+			ids = append(ids, e.Name())
+		}
+	}
+	return ids
+}
+
+// QuarantineCount is how many files node i has moved into quarantine/.
+func (c *Cluster) QuarantineCount(i int) int {
+	c.t.Helper()
+	entries, err := os.ReadDir(filepath.Join(c.nodes[i].dir, "quarantine"))
+	if err != nil {
+		c.t.Fatalf("QuarantineCount(%d): %v", i, err)
+	}
+	return len(entries)
 }
 
 // Quarantined reports whether node i has moved blob id into quarantine/,
