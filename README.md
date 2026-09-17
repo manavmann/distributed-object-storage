@@ -5,8 +5,7 @@ Distributed object storage in Go: one coordinator, N storage nodes, replicated c
 [![ci](https://github.com/manavmann/distributed-object-storage/actions/workflows/ci.yml/badge.svg)](https://github.com/manavmann/distributed-object-storage/actions/workflows/ci.yml)
 
 **Status:** four-node cluster in Docker with replication factor 3 and write quorum 2;
-reads fail over when a holder is down (exercised by `make smoke`). Repair, GC and
-metrics are not implemented yet.
+reads fail over when a holder is down; repair, GC, and Prometheus metrics complete. Run `make demo` for the full walkthrough.
 
 ## Architecture
 
@@ -89,8 +88,7 @@ curl      "localhost:8080/cluster/locate?bucket=photos&key=cat.jpg"  # replicas 
 - Packaging: one distroless image with both binaries (`deploy/Dockerfile`), no
   shell; `-healthcheck` flag on each binary backs the compose healthchecks.
 
-Not yet: repair of under-replicated objects, garbage collection of deleted
-blobs, metrics. See `docs/architecture.md` for the design.
+Repair, GC, and Prometheus metrics are all implemented. See `docs/architecture.md` for the full design.
 
 ## Development
 

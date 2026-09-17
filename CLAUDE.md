@@ -34,13 +34,13 @@ Read docs/architecture.md for flows. Read docs/progress.md for current state.
 - Log with slog and the event names in internal/events. Metrics labels are bounded.
 
 ## Layout
-cmd/{coordinator,storagenode,bench}  internal/{api,blob,cluster,config,coordinator,httpx,
-meta,metrics,nodeclient,placement,repair,replication,storage,testcluster}
+cmd/{coordinator,storagenode,bench}  internal/{api,blob,cluster,config,coordinator,events,
+httpx,meta,metrics,nodeclient,placement,repair,replication,storage,testcluster}
 test/integration  deploy/  scripts/  docs/
 
 ## Commands
 make build | make test (go test -race ./...) | make lint | make up | make down |
-make smoke | make demo | make bench
+make smoke | make bench | make demo (stub: prints "not implemented yet")
 
 ## Process
 - Implement only the roadmap item you were given. Stop and ask when something contradicts it.

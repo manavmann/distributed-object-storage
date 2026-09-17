@@ -191,8 +191,9 @@ func (s *Store) Read(id string) (*Blob, error) {
 }
 
 // Delete moves blob id to quarantine/ so it stops being served. The bytes
-// stay on disk for GC to reclaim. It returns ErrNotFound if there is no
-// such blob.
+// stay on disk: nothing in the system removes files from quarantine/, so
+// an operator can inspect or recover them. It returns ErrNotFound if there
+// is no such blob.
 func (s *Store) Delete(id string) error {
 	if err := checkID(id); err != nil {
 		return err

@@ -12,9 +12,12 @@ Decision: use modernc.org/sqlite, a pure-Go transpilation of SQLite, through
 database/sql. No ORM, no migration framework; the schema is one embedded
 idempotent schema.sql.
 
-Consequences: no cgo, so `go build` and `-race` work on every platform
-without a C toolchain. The driver pulls in a handful of indirect modernc.org
-modules. One connection (SetMaxOpenConns(1)) serializes all access, which is
+Consequences: no cgo, so `go build` works on every platform without a C
+toolchain (the Docker image is built with `CGO_ENABLED=0`). The race
+detector is a separate matter: `go test -race` needs cgo and therefore a C
+compiler on Windows regardless of the SQLite driver, so `-race` runs on
+Linux in CI and locally only where gcc is installed. The driver pulls in a
+handful of indirect modernc.org modules. One connection (SetMaxOpenConns(1)) serializes all access, which is
 what the single-writer coordinator wants anyway.
 
 ## github.com/prometheus/client_golang for metrics
