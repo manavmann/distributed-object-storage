@@ -1,9 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C17. C17: corruption loop closed — repair drops the source's replica row on ErrIntegrity (was a stale-row leak); scripts/corrupt.sh + smoke corruption step; docs/failure-model.md started; 3 harness tests for 1/2/3 corrupt copies.
-Next: C18 — (next roadmap item)
-
+Done: C1–C19. C19: repair step 3 trims over-replication — meta.OverReplicated + TrimReplica (conditional: drops the row only while >RF UP holders remain, enqueues the delete in the same tx), worker picks the lowest placement-ranked UP holder, event trim_enqueued.
+Next: C20 — (next roadmap item)
 ## Hours ledger
 | Item | Est | Actual | Notes |
 |---|---|---|---|
@@ -24,3 +23,5 @@ Next: C18 — (next roadmap item)
 | C15 | repair+integration -race -count=3 in ~9s; Placement field omitted (placement is a stateless package), back-off filtered in the worker not SQL; harness RepairInterval defaults to 1m so pre-GC pending-count assertions stay exact; node DELETE quarantines rather than unlinks, so "reclaimed" = gone from blobs/, present in quarantine/ |
 | C16 | | | internal+integration -race -count=3 in ~13s; repair ranks by key (same as the writer), not bucket/key; HangWrites cuts the PUT before the node stores anything so the stale-copy path is covered by a repair unit test whose target deletes the object mid-PUT; no_source test needs grace > monitor sweep (1s) so three kills land before any repair; holders is fetched per candidate inside the same tx rather than group_concat |
 | C17 | | | Go chain (quarantine→ErrIntegrity→drop→repair) was already wired; the only hole was repair reading a corrupt source. Corruption is read-triggered, so "two corrupt → repaired" must keep GETting until both are visited (reads shuffle). Git Bash rewrites /data paths in docker args — keep them inside sh -c. Compose nodes heartbeat every 5s (default) vs 3s coordinator timeout, so nodes flap DOWN/UP every 5s in `make up`; smoke passes anyway. |
+| C18 | | | meta+api+coordinator+integration -race clean; sweep runs only at startup, so an intent younger than 2× timeout at restart waits for the next restart; sweep fans out to every `nodes` row since nobody recorded which nodes the blob reached, GC treats "already gone" as done; StartedAt is caller-supplied so tests can seed a stale intent without a clock hook; `git stash` on this box rewrites touched files to CRLF (autocrlf=true) and trips gofmt — `gofmt -w` on them fixes it |
+| C19 | | | meta+repair+integration -race clean; the trimmed copy is always the spare in practice (PUT and repair both rank by key, so the restarted original holder outranks the repair target); TrimReplica re-checks the UP count inside the tx so a node going DOWN between fetch and commit cannot push a blob below RF; a DOWN holder is never the victim, only UP copies are trimmed |

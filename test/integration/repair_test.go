@@ -261,3 +261,53 @@ func TestTwentyObjectsRepaired(t *testing.T) {
 		}
 	}
 }
+
+// TestOverReplicationTrimmed kills a holder, lets repair copy the blob
+// onto the spare, then brings the holder back: four UP nodes now hold the
+// blob. The worker must trim exactly one copy, the one placement ranks
+// last, and the UP holder count must never dip below RF on the way.
+func TestOverReplicationTrimmed(t *testing.T) {
+	t.Parallel()
+	c := repairCluster(t, time.Millisecond, 5*time.Second)
+	blobID, holders, spare := putOnThree(t, c, "k")
+	killed, _ := killNode(t, c, holders[0])
+	testcluster.WaitFor(t, func() bool {
+		return underReplicated(t, c) == 0 && c.HasBlob(spare, blobID)
+	}, "repair onto "+c.NodeID(spare))
+
+	c.Restart(killed)
+	waitStatus(t, c, c.NodeID(killed), cluster.StatusUp)
+	var all []string
+	for i := 0; i < 4; i++ {
+		all = append(all, c.NodeID(i))
+	}
+	ranked := placement.Rank("k", all)
+	victim := ranked[len(ranked)-1]
+	victimIndex := nodeIndex(t, c, 4, victim)
+
+	testcluster.WaitFor(t, func() bool {
+		up := upHolders(t, c, blobID)
+		if len(up) < 3 {
+			t.Fatalf("UP holders dropped to %v while trimming", up)
+		}
+		return len(up) == 3 && !c.HasBlob(victimIndex, blobID)
+	}, "trim of "+victim)
+	wantUp := slices.DeleteFunc(slices.Clone(all), func(id string) bool { return id == victim })
+	if up := upHolders(t, c, blobID); !sameSet(up, wantUp) {
+		t.Fatalf("UP holders after trim = %v, want %v", up, wantUp)
+	}
+	if !c.Quarantined(victimIndex, blobID) {
+		t.Fatalf("trimmed copy on %s was not quarantined", victim)
+	}
+	testcluster.WaitFor(t, func() bool { return pendingCount(t, c) == 0 }, "trim delete reclaimed")
+	gcProbe(t, c, "probe")
+	if _, now := c.Locate("bkt", "k"); !sameSet(now, wantUp) {
+		t.Fatalf("holders after settling = %v, want %v", now, wantUp)
+	}
+	if got := underReplicated(t, c); got != 0 {
+		t.Fatalf("under_replicated = %d after trim, want 0", got)
+	}
+	if obj, err := c.Client().Get("bkt", "k"); err != nil || string(obj.Body) != "payload for k" {
+		t.Fatalf("get after trim = %q, %v", obj.Body, err)
+	}
+}

@@ -785,3 +785,85 @@ func (d *DB) AddReplicaIfLive(ctx context.Context, blobID, nodeID string) (bool,
 	})
 	return added, err
 }
+
+// OverReplicated is one blob with more than n UP holders. Holders lists
+// every replica row of the blob, UP and DOWN.
+type OverReplicated struct {
+	BlobID  string
+	Key     string
+	Holders []Replica
+}
+
+// OverReplicated returns up to limit blobs that more than n UP nodes hold,
+// ordered by blob id, each with all of its holders.
+func (d *DB) OverReplicated(ctx context.Context, n, limit int) ([]OverReplicated, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("meta: over-replicated: limit must be positive, got %d", limit)
+	}
+	var out []OverReplicated
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT o.blob_id, o.key FROM objects o
+			JOIN replicas r ON r.blob_id = o.blob_id
+			JOIN nodes n ON n.node_id = r.node_id
+			GROUP BY o.blob_id
+			HAVING SUM(n.status = 'UP') > ?
+			ORDER BY o.blob_id LIMIT ?`, n, limit)
+		if err != nil {
+			return fmt.Errorf("meta: over-replicated: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var o OverReplicated
+			if err := rows.Scan(&o.BlobID, &o.Key); err != nil {
+				return fmt.Errorf("meta: over-replicated: %w", err)
+			}
+			out = append(out, o)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("meta: over-replicated: %w", err)
+		}
+		for i := range out {
+			out[i].Holders, err = replicasIn(ctx, tx, out[i].BlobID)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// TrimReplica forgets that nodeID holds blobID and queues that copy for
+// deletion, in one transaction, but only if nodeID is UP and more than n
+// UP nodes still hold the blob, so the blob never drops below n UP
+// holders. It reports whether the replica was trimmed.
+func (d *DB) TrimReplica(ctx context.Context, blobID, nodeID string, n int) (bool, error) {
+	var trimmed bool
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM replicas WHERE blob_id = ? AND node_id = ?
+			AND (SELECT status FROM nodes WHERE node_id = ?) = 'UP'
+			AND (SELECT COUNT(*) FROM replicas r JOIN nodes n ON n.node_id = r.node_id
+				WHERE r.blob_id = ? AND n.status = 'UP') > ?`, blobID, nodeID, nodeID, blobID, n)
+		if err != nil {
+			return fmt.Errorf("meta: trim replica %s on %s: %w", blobID, nodeID, err)
+		}
+		c, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("meta: trim replica %s on %s: %w", blobID, nodeID, err)
+		}
+		if c == 0 {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pending_deletes (blob_id, node_id, enqueued_at) VALUES (?, ?, ?)`, blobID, nodeID, now()); err != nil {
+			return fmt.Errorf("meta: enqueue delete %s on %s: %w", blobID, nodeID, err)
+		}
+		trimmed = true
+		return nil
+	})
+	return trimmed, err
+}

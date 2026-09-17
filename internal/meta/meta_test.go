@@ -665,3 +665,73 @@ func TestPendingUploads(t *testing.T) {
 		t.Fatalf("second sweep = %+v, %v; want none", swept, err)
 	}
 }
+
+func TestOverReplicatedAndTrim(t *testing.T) {
+	db, _ := openTemp(t)
+	ctx := context.Background()
+	mustCreateBucket(t, db, "b")
+	mustUpsertNodes(t, db, "n1", "n2", "n3", "n4", "n5")
+	mustCommit(t, db, "b", "four", "blob-four", "n1", "n2", "n3", "n4")
+	mustCommit(t, db, "b", "down", "blob-down", "n1", "n2", "n3", "n5")
+	mustCommit(t, db, "b", "full", "blob-full", "n1", "n2", "n3")
+	if err := db.SetNodeStatus(ctx, "n5", "DOWN"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.OverReplicated(ctx, 3, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].BlobID != "blob-four" || got[0].Key != "four" {
+		t.Fatalf("OverReplicated(3) = %+v, want blob-four only", got)
+	}
+	var holders []string
+	for _, h := range got[0].Holders {
+		holders = append(holders, h.NodeID+"="+h.Status)
+	}
+	if fmt.Sprint(holders) != "[n1=UP n2=UP n3=UP n4=UP]" {
+		t.Fatalf("holders of blob-four = %v", holders)
+	}
+	if got, err = db.OverReplicated(ctx, 2, 1); err != nil || len(got) != 1 || got[0].BlobID != "blob-down" {
+		t.Fatalf("OverReplicated(2, limit 1) = %+v, %v; want blob-down", got, err)
+	}
+	if _, err = db.OverReplicated(ctx, 3, 0); err == nil {
+		t.Fatal("limit 0 accepted")
+	}
+
+	// A DOWN holder is never trimmed, and a blob at exactly n is left alone.
+	if trimmed, err := db.TrimReplica(ctx, "blob-down", "n5", 3); err != nil || trimmed {
+		t.Fatalf("TrimReplica(DOWN holder) = %v, %v; want false", trimmed, err)
+	}
+	if trimmed, err := db.TrimReplica(ctx, "blob-full", "n1", 3); err != nil || trimmed {
+		t.Fatalf("TrimReplica(at n) = %v, %v; want false", trimmed, err)
+	}
+	if n, err := db.CountPending(ctx); err != nil || n != 0 {
+		t.Fatalf("pending after refused trims = %d, %v; want 0", n, err)
+	}
+
+	if trimmed, err := db.TrimReplica(ctx, "blob-four", "n4", 3); err != nil || !trimmed {
+		t.Fatalf("TrimReplica(blob-four, n4) = %v, %v; want true", trimmed, err)
+	}
+	reps, err := db.Replicas(ctx, "blob-four")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range reps {
+		ids = append(ids, r.NodeID)
+	}
+	if fmt.Sprint(ids) != "[n1 n2 n3]" {
+		t.Fatalf("replicas after trim = %v", ids)
+	}
+	pend, err := db.PendingDeletesForNodes(ctx, []string{"n4"}, 10)
+	if err != nil || len(pend) != 1 || pend[0].BlobID != "blob-four" {
+		t.Fatalf("pending on n4 = %+v, %v; want blob-four", pend, err)
+	}
+	if trimmed, err := db.TrimReplica(ctx, "blob-four", "n3", 3); err != nil || trimmed {
+		t.Fatalf("second TrimReplica = %v, %v; want false", trimmed, err)
+	}
+	if got, err = db.OverReplicated(ctx, 3, 10); err != nil || len(got) != 0 {
+		t.Fatalf("OverReplicated(3) after trim = %+v, %v; want none", got, err)
+	}
+}

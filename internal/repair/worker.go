@@ -4,7 +4,9 @@
 // not told it to. Step 1 is garbage collection: draining pending_deletes
 // by asking the holding node to quarantine each copy. Step 2 is
 // re-replication: copying each blob that fewer than RF UP nodes hold onto
-// the node placement ranks first among the healthy non-holders.
+// the node placement ranks first among the healthy non-holders. Step 3 is
+// trimming: for each blob that more than RF UP nodes hold, the copy on the
+// UP holder placement ranks last is forgotten and queued for deletion.
 package repair
 
 import (
@@ -69,11 +71,13 @@ func (w *Worker) SkippedNoSource() int64 {
 }
 
 // tick is one pass of the worker: step 1 garbage-collects pending_deletes,
-// step 2 re-replicates under-replicated blobs. Stale pending_uploads are
-// swept into pending_deletes by the coordinator at startup, not here.
+// step 2 re-replicates under-replicated blobs, step 3 trims
+// over-replicated ones. Stale pending_uploads are swept into
+// pending_deletes by the coordinator at startup, not here.
 func (w *Worker) tick(ctx context.Context) {
 	w.gc(ctx)
 	w.rereplicate(ctx)
+	w.trim(ctx)
 }
 
 // healthy is the registry's UP nodes as the ids placement ranks and the
@@ -228,4 +232,41 @@ func (w *Worker) copy(ctx context.Context, c meta.UnderReplicated, source meta.R
 		return
 	}
 	w.Log.Info("repair_completed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "duration", time.Since(start))
+}
+
+// trim fetches one batch of blobs with more than RF UP holders and, for
+// each, drops the replica on the UP holder placement ranks last, queueing
+// that copy for the next tick's gc. The drop is conditional: metadata
+// re-checks inside the transaction that the blob still has more than RF
+// UP holders, so a holder going DOWN in between never leaves the blob
+// short.
+func (w *Worker) trim(ctx context.Context) {
+	cands, err := w.DB.OverReplicated(ctx, w.RF, w.BatchSize)
+	if err != nil {
+		w.Log.Error("trim_fetch_failed", "err", err)
+		return
+	}
+	for _, c := range cands {
+		if ctx.Err() != nil {
+			return
+		}
+		var up []string
+		for _, h := range c.Holders {
+			if h.Status == cluster.StatusUp {
+				up = append(up, h.NodeID)
+			}
+		}
+		ranked := placement.Rank(c.Key, up)
+		victim := ranked[len(ranked)-1]
+		trimmed, err := w.DB.TrimReplica(ctx, c.BlobID, victim, w.RF)
+		if err != nil {
+			w.Log.Error("trim_failed", "blob_id", c.BlobID, "node_id", victim, "err", err)
+			continue
+		}
+		if !trimmed {
+			w.Log.Info("trim_skipped", "blob_id", c.BlobID, "node_id", victim, "reason", "not_over_replicated")
+			continue
+		}
+		w.Log.Info("trim_enqueued", "blob_id", c.BlobID, "node_id", victim, "up_holders", len(up)-1)
+	}
 }
