@@ -161,3 +161,54 @@ func TestMetricsLabelsRouteByPattern(t *testing.T) {
 		t.Fatalf("HTTPDuration has %d series, want 2", n)
 	}
 }
+
+func TestBearerAuth(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	tests := []struct {
+		name, secret, header string
+		want                 int
+	}{
+		{name: "off, no header", secret: "", header: "", want: http.StatusNoContent},
+		{name: "off, any header", secret: "", header: "Bearer whatever", want: http.StatusNoContent},
+		{name: "missing", secret: "s3cret", header: "", want: http.StatusUnauthorized},
+		{name: "wrong", secret: "s3cret", header: "Bearer nope", want: http.StatusUnauthorized},
+		{name: "prefix only", secret: "s3cret", header: "Bearer s3cre", want: http.StatusUnauthorized},
+		{name: "wrong scheme", secret: "s3cret", header: "Basic s3cret", want: http.StatusUnauthorized},
+		{name: "right", secret: "s3cret", header: "Bearer s3cret", want: http.StatusNoContent},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			RequestID(BearerAuth(tc.secret, ok)).ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			if tc.want != http.StatusUnauthorized {
+				return
+			}
+			if rec.Header().Get("WWW-Authenticate") != "Bearer" {
+				t.Fatalf("WWW-Authenticate = %q", rec.Header().Get("WWW-Authenticate"))
+			}
+			var eb ErrorBody
+			if err := json.Unmarshal(rec.Body.Bytes(), &eb); err != nil || eb.Error.Code != "unauthorized" || eb.RequestID == "" {
+				t.Fatalf("body = %s (%v)", rec.Body, err)
+			}
+		})
+	}
+}
+
+func TestSetBearer(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	SetBearer(req, "")
+	if _, set := req.Header["Authorization"]; set {
+		t.Fatalf("empty secret set Authorization = %q", req.Header.Get("Authorization"))
+	}
+	SetBearer(req, "s3cret")
+	if got := req.Header.Get("Authorization"); got != "Bearer s3cret" {
+		t.Fatalf("Authorization = %q", got)
+	}
+}

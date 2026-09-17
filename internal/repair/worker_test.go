@@ -59,7 +59,7 @@ func TestBatchSizeRespected(t *testing.T) {
 	}
 
 	w := &Worker{
-		DB: db, Client: nodeclient.New(), Registry: reg,
+		DB: db, Client: nodeclient.New(""), Registry: reg,
 		Interval: time.Minute, Grace: time.Minute, BatchSize: 2, Timeout: time.Second, Metrics: metrics.New(), Log: log,
 	}
 	for tick, wantSent := 1, 2; tick <= 3; tick++ {
@@ -121,7 +121,7 @@ func TestRepairStaleCopyQueued(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	client := nodeclient.New()
+	client := nodeclient.New("")
 	payload := []byte("copy me")
 	sum := sha256.Sum256(payload)
 	const blobID = "blob-stale"
@@ -188,7 +188,7 @@ func TestRepairCorruptSourceDropped(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	client := nodeclient.New()
+	client := nodeclient.New("")
 	payload := []byte("about to rot")
 	sum := sha256.Sum256(payload)
 	const blobID = "blob-corrupt"

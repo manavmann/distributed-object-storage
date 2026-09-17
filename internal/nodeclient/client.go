@@ -38,13 +38,17 @@ var (
 // Client talks to storage nodes over one shared connection pool. It is
 // safe for concurrent use.
 type Client struct {
-	http *http.Client
+	http   *http.Client
+	secret string
 }
 
-// New returns a client. Each call names its node by base URL (an absolute
-// http(s) URL with no path); deadlines come from the ctx of each call.
-func New() *Client {
+// New returns a client that sends secret as a bearer token on every
+// request, or no token when secret is empty. Each call names its node by
+// base URL (an absolute http(s) URL with no path); deadlines come from
+// the ctx of each call.
+func New(secret string) *Client {
 	return &Client{
+		secret: secret,
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext:         (&net.Dialer{Timeout: DialTimeout}).DialContext,
@@ -168,6 +172,7 @@ func (c *Client) request(ctx context.Context, method, addr, id string, body io.R
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
+	httpx.SetBearer(req, c.secret)
 	return req, nil
 }
 

@@ -40,14 +40,17 @@ type server struct {
 //	GET    /healthz     200
 //	GET    /metrics     200 Prometheus text format
 //
-// Every response carries X-Request-ID and every request is logged and
-// counted under its route pattern.
-func NewHandler(store *Store, m *metrics.Metrics, log *slog.Logger) http.Handler {
+// When secret is non-empty every /blobs/* request must carry it as a
+// bearer token or gets 401; /healthz and /metrics stay open. Every
+// response carries X-Request-ID and every request is logged and counted
+// under its route pattern.
+func NewHandler(store *Store, secret string, m *metrics.Metrics, log *slog.Logger) http.Handler {
 	s := &server{store: store, log: log}
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /blobs/{id}", s.handlePut)
-	mux.HandleFunc("GET /blobs/{id}", s.handleGet)
-	mux.HandleFunc("DELETE /blobs/{id}", s.handleDelete)
+	auth := func(h http.HandlerFunc) http.Handler { return httpx.BearerAuth(secret, h) }
+	mux.Handle("PUT /blobs/{id}", auth(s.handlePut))
+	mux.Handle("GET /blobs/{id}", auth(s.handleGet))
+	mux.Handle("DELETE /blobs/{id}", auth(s.handleDelete))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

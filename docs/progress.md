@@ -1,8 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C27. C27: cmd/cairnctl (mb ls put get rm status locate; -url from CAIRN_URL; streams file bodies via *os.File/io.Copy; ls pages to exhaustion; 219 lines).
-Next: C28 — (next roadmap item)
+Done: C1–C28. C28: node scrubber (Store.Scrub via Read, one blob per CAIRN_SCRUB_DELAY, pass per CAIRN_SCRUB_INTERVAL); failures ride the heartbeat as scrub_failures ids, coordinator drops the replica rows, /cluster/status counts them per node.
+Next: C29 — (next roadmap item)
 ## Hours ledger
 | Item | Est | Actual | Notes |
 |---|---|---|---|
@@ -33,5 +33,6 @@ Next: C28 — (next roadmap item)
 | C25 | | | Revisons and fixes
 | C26 | | | `make demo -- -y` PASS in 60s from `make down && make up`; make lint test clean; after `--` make turns `-y` into a goal, so the Makefile has a no-op `-y` target and forwards `$(filter -y,$(MAKECMDGOALS))`; the corrupt-copy dip in locate lasts ~350ms (drop + re-repair onto the same node within one tick) so the demo detects it via cairn_integrity_failures_total and the node's quarantine/ listing, not a locate poll — smoke.sh's RF−1 locate assertion is the same race and only passes by tick timing |
 | C27 | | | cmd/cairnctl -race -count=5 clean; verified against `make up`: 8 MiB put/get byte-identical, rm → 404 exit 1; a zero-byte put must set http.NoBody or net/http sends chunked and the API 411s; bucket names must be ≥3 chars so the test uses "ctl" not "b"; key segments are PathEscaped so "dir/k 1" round-trips |
+| C28 | | | storage+integration -race clean, new tests -count=5 clean; scrub failures are drained only after a 2xx (acked callback on RunHeartbeat) and capped at 64 ids per heartbeat so the 4 KiB heartbeat body limit holds, the rest wait a beat; the coordinator's per-node scrub_failures count is in-memory only and resets on restart; "decrement the blob counter" is BlobCount()/cairn_node_blobs, which re-read blobs/ on each heartbeat so quarantine decrements them without a separate counter |
 
 

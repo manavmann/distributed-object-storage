@@ -24,6 +24,7 @@ var ErrInvalidConfig = errors.New("config: invalid")
 //	CAIRN_HEARTBEAT_INTERVAL  5s                       time between heartbeats
 //	CAIRN_SCRUB_INTERVAL      1h                       time between scrub passes over blobs/
 //	CAIRN_SCRUB_DELAY         10ms                     pause before each blob within a pass
+//	CAIRN_CLUSTER_SECRET      (unset)                  shared secret sent to the coordinator and required on /blobs/*; off when unset
 type NodeConfig struct {
 	NodeID            string
 	Addr              string
@@ -33,6 +34,7 @@ type NodeConfig struct {
 	HeartbeatInterval time.Duration
 	ScrubInterval     time.Duration
 	ScrubDelay        time.Duration
+	ClusterSecret     string
 }
 
 // LoadNode builds a NodeConfig from getenv (normally os.Getenv), applying
@@ -54,6 +56,7 @@ func LoadNode(getenv func(string) string) (NodeConfig, error) {
 		AdvertiseAddr:  get("CAIRN_ADVERTISE_ADDR", "http://localhost:9100"),
 		DataDir:        get("CAIRN_DATA_DIR", "./data"),
 		CoordinatorURL: get("CAIRN_COORDINATOR_URL", "http://localhost:9000"),
+		ClusterSecret:  getenv("CAIRN_CLUSTER_SECRET"),
 	}
 	for _, d := range []struct {
 		name, def string

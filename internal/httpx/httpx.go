@@ -5,6 +5,7 @@ package httpx
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"github.com/manavmann/distributed-object-storage/internal/events"
@@ -12,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -106,6 +108,32 @@ func WriteError(w http.ResponseWriter, r *http.Request, status int, code, msg st
 		Error:     ErrorDetail{Code: code, Message: msg},
 		RequestID: RequestIDFrom(r.Context()),
 	})
+}
+
+// BearerAuth requires every request to carry "Authorization: Bearer
+// <secret>" and answers 401 otherwise. An empty secret turns the check
+// off: next then serves every request as before.
+func BearerAuth(secret string, next http.Handler) http.Handler {
+	if secret == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(secret)) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			WriteError(w, r, http.StatusUnauthorized, "unauthorized", "missing or wrong cluster secret")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// SetBearer adds the header BearerAuth checks to req. An empty secret
+// adds nothing.
+func SetBearer(req *http.Request, secret string) {
+	if secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
 }
 
 // Metrics records each response in m.HTTPRequests and m.HTTPDuration

@@ -19,6 +19,7 @@ func TestLoadCoordinatorTable(t *testing.T) {
 		"CAIRN_WRITE_QUORUM":       "4",
 		"CAIRN_REPAIR_INTERVAL":    "2s",
 		"CAIRN_REPAIR_GRACE":       "10s",
+		"CAIRN_CLUSTER_SECRET":     "hunter2",
 	}
 	with := func(k, v string) map[string]string {
 		m := map[string]string{}
@@ -42,7 +43,7 @@ func TestLoadCoordinatorTable(t *testing.T) {
 		{name: "all set", env: full, want: CoordinatorConfig{
 			Addr: "127.0.0.1:0", DataDir: "/var/cairn",
 			MaxObjectSize: 1024, MaxUploads: 2, NodeTimeout: 5 * time.Second, HeartbeatTimeout: 6 * time.Second,
-			RF: 5, W: 4, RepairInterval: 2 * time.Second, RepairGrace: 10 * time.Second,
+			RF: 5, W: 4, RepairInterval: 2 * time.Second, RepairGrace: 10 * time.Second, ClusterSecret: "hunter2",
 		}},
 		{name: "bad size", env: with("CAIRN_MAX_OBJECT_SIZE", "big"), bad: true},
 		{name: "zero size", env: with("CAIRN_MAX_OBJECT_SIZE", "0"), bad: true},

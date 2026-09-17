@@ -60,7 +60,8 @@ func main() {
 func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slog.Logger) error {
 	node, err := storage.NewNode(cfg.DataDir, storage.NodeOptions{
 		ID: cfg.NodeID, HeartbeatInterval: cfg.HeartbeatInterval,
-		ScrubInterval: cfg.ScrubInterval, ScrubDelay: cfg.ScrubDelay, Metrics: metrics.New(), Log: log,
+		ScrubInterval: cfg.ScrubInterval, ScrubDelay: cfg.ScrubDelay, ClusterSecret: cfg.ClusterSecret,
+		Metrics: metrics.New(), Log: log,
 	})
 	if err != nil {
 		return err

@@ -22,7 +22,7 @@ import (
 func newServer(t *testing.T) (*httptest.Server, *Store, string) {
 	t.Helper()
 	s, root := openStore(t)
-	srv := httptest.NewServer(NewHandler(s, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv := httptest.NewServer(NewHandler(s, "", metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(srv.Close)
 	return srv, s, root
 }
@@ -258,5 +258,48 @@ func TestBlobCountAndFreeBytes(t *testing.T) {
 	}
 	if free, err := s.FreeBytes(); err != nil || free == 0 {
 		t.Fatalf("FreeBytes = %d, %v; want > 0", free, err)
+	}
+}
+
+// TestBlobsRequireSecret builds a node with a cluster secret and checks
+// that /blobs/* is closed without it, open with it, and that /healthz
+// and /metrics never ask for it.
+func TestBlobsRequireSecret(t *testing.T) {
+	s, _ := openStore(t)
+	srv := httptest.NewServer(NewHandler(s, "s3cret", metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil))))
+	t.Cleanup(srv.Close)
+	body := []byte("payload")
+	id := hex.EncodeToString(bytes.Repeat([]byte{1}, 16))
+	for _, tc := range []struct {
+		method, path string
+		body         io.Reader
+	}{
+		{http.MethodPut, "/blobs/" + id, bytes.NewReader(body)},
+		{http.MethodGet, "/blobs/" + id, nil},
+		{http.MethodHead, "/blobs/" + id, nil},
+		{http.MethodDelete, "/blobs/" + id, nil},
+	} {
+		resp, out := do(t, srv, tc.method, tc.path, tc.body)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s %s without secret = %d %s", tc.method, tc.path, resp.StatusCode, out)
+		}
+		if tc.method != http.MethodHead && errBody(t, out).Error.Code != "unauthorized" {
+			t.Fatalf("%s %s without secret: body %s", tc.method, tc.path, out)
+		}
+		resp, out = do(t, srv, tc.method, tc.path, tc.body, "Authorization", "Bearer wrong")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s %s with wrong secret = %d %s", tc.method, tc.path, resp.StatusCode, out)
+		}
+	}
+	if resp, out := do(t, srv, http.MethodPut, "/blobs/"+id, bytes.NewReader(body), "Authorization", "Bearer s3cret"); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT with secret = %d %s", resp.StatusCode, out)
+	}
+	if resp, out := do(t, srv, http.MethodGet, "/blobs/"+id, nil, "Authorization", "Bearer s3cret"); resp.StatusCode != http.StatusOK || !bytes.Equal(out, body) {
+		t.Fatalf("GET with secret = %d %q", resp.StatusCode, out)
+	}
+	for _, path := range []string{"/healthz", "/metrics"} {
+		if resp, out := do(t, srv, http.MethodGet, path, nil); resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s without secret = %d %s", path, resp.StatusCode, out)
+		}
 	}
 }

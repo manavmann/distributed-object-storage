@@ -27,7 +27,7 @@ func newNode(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(storage.NewHandler(store, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv := httptest.NewServer(storage.NewHandler(store, "", metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
@@ -38,7 +38,7 @@ func digest(b []byte) string {
 }
 
 func TestRoundTrip(t *testing.T) {
-	c, addr := New(), newNode(t)
+	c, addr := New(""), newNode(t)
 	ctx := context.Background()
 	payload := bytes.Repeat([]byte("cairn"), 10_000)
 	if err := c.Put(ctx, addr, "b1", bytes.NewReader(payload), int64(len(payload)), digest(payload)); err != nil {
@@ -75,7 +75,7 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestNotFound(t *testing.T) {
-	c, addr := New(), newNode(t)
+	c, addr := New(""), newNode(t)
 	ctx := context.Background()
 	if _, err := c.Get(ctx, addr, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get = %v, want ErrNotFound", err)
@@ -89,7 +89,7 @@ func TestNotFound(t *testing.T) {
 }
 
 func TestPutChecksumMismatch(t *testing.T) {
-	c, addr := New(), newNode(t)
+	c, addr := New(""), newNode(t)
 	payload := []byte("hello")
 	err := c.Put(context.Background(), addr, "b1", bytes.NewReader(payload), int64(len(payload)), digest([]byte("other")))
 	if !errors.Is(err, ErrChecksum) {
@@ -101,7 +101,7 @@ func TestPutChecksumMismatch(t *testing.T) {
 }
 
 func TestPutInvalidID(t *testing.T) {
-	c, addr := New(), newNode(t)
+	c, addr := New(""), newNode(t)
 	err := c.Put(context.Background(), addr, ".hidden", bytes.NewReader(nil), 0, digest(nil))
 	if !errors.Is(err, ErrChecksum) {
 		t.Fatalf("Put = %v, want ErrChecksum", err)
@@ -135,7 +135,7 @@ func TestErrorMapping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, addr := New(), stub(t, tc.status, tc.code)
+			c, addr := New(""), stub(t, tc.status, tc.code)
 			ctx := context.Background()
 			if _, err := c.Get(ctx, addr, "x"); !errors.Is(err, tc.want) {
 				t.Errorf("Get = %v, want %v", err, tc.want)
@@ -163,7 +163,7 @@ func TestUnreadableErrorBody(t *testing.T) {
 		io.WriteString(w, "<html>gateway</html>")
 	}))
 	t.Cleanup(srv.Close)
-	if _, err := New().Get(context.Background(), srv.URL, "x"); !errors.Is(err, ErrUnavailable) {
+	if _, err := New("").Get(context.Background(), srv.URL, "x"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Get = %v, want ErrUnavailable", err)
 	}
 }
@@ -175,7 +175,7 @@ func TestConnectionRefused(t *testing.T) {
 	}
 	addr := "http://" + ln.Addr().String()
 	ln.Close()
-	c := New()
+	c := New("")
 	if _, err := c.Get(context.Background(), addr, "x"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Get = %v, want ErrUnavailable", err)
 	}
@@ -195,7 +195,7 @@ func TestDeadline(t *testing.T) {
 	t.Cleanup(func() { close(release); srv.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := New().Get(ctx, srv.URL, "x")
+	_, err := New("").Get(ctx, srv.URL, "x")
 	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Get = %v, want ErrUnavailable wrapping DeadlineExceeded", err)
 	}
@@ -204,7 +204,7 @@ func TestDeadline(t *testing.T) {
 func TestPutTruncatedBodyIsNotStored(t *testing.T) {
 	// Declaring more bytes than the reader yields makes the transport fail
 	// the request; the node sees a truncated body and never acknowledges.
-	c, addr := New(), newNode(t)
+	c, addr := New(""), newNode(t)
 	payload := []byte("short")
 	err := c.Put(context.Background(), addr, "b1", bytes.NewReader(payload), int64(len(payload))+10, digest(payload))
 	if !errors.Is(err, ErrUnavailable) {
@@ -230,7 +230,7 @@ func (d *flakyDialer) dial(ctx context.Context, network, addr string) (net.Conn,
 }
 
 func TestPutRetriesFailedDialOnce(t *testing.T) {
-	c, addr := New(), newNode(t)
+	c, addr := New(""), newNode(t)
 	tr := c.http.Transport.(*http.Transport)
 	d := &flakyDialer{real: tr.DialContext}
 	tr.DialContext = d.dial
@@ -254,7 +254,7 @@ func TestPutDoesNotRetryNodeErrors(t *testing.T) {
 		httpx.WriteError(w, r, http.StatusInternalServerError, "internal", "stub")
 	}))
 	t.Cleanup(srv.Close)
-	err := New().Put(context.Background(), srv.URL, "x", bytes.NewReader([]byte("a")), 1, digest([]byte("a")))
+	err := New("").Put(context.Background(), srv.URL, "x", bytes.NewReader([]byte("a")), 1, digest([]byte("a")))
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Put = %v, want ErrUnavailable", err)
 	}

@@ -28,7 +28,7 @@ func TestServeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := httptest.NewServer(storage.NewHandler(store, metrics.New(), log))
+	node := httptest.NewServer(storage.NewHandler(store, "", metrics.New(), log))
 	t.Cleanup(node.Close)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

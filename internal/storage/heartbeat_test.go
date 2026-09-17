@@ -36,7 +36,7 @@ func TestHeartbeatPostsAndSurvives500s(t *testing.T) {
 	var seq atomic.Int32
 	go func() {
 		defer close(done)
-		RunHeartbeat(ctx, coord.Client(), coord.URL, 5*time.Millisecond, func() Heartbeat {
+		RunHeartbeat(ctx, coord.Client(), coord.URL, "", 5*time.Millisecond, func() Heartbeat {
 			return Heartbeat{NodeID: "n1", Addr: "http://n1:9100", BlobCount: int(seq.Add(1)), FreeBytes: 42}
 		}, func(Heartbeat) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
@@ -72,7 +72,7 @@ func TestHeartbeatUnreachableCoordinator(t *testing.T) {
 	var calls atomic.Int32
 	go func() {
 		defer close(done)
-		RunHeartbeat(ctx, &http.Client{Timeout: time.Second}, url, time.Millisecond, func() Heartbeat {
+		RunHeartbeat(ctx, &http.Client{Timeout: time.Second}, url, "", time.Millisecond, func() Heartbeat {
 			if calls.Add(1) == 3 {
 				cancel()
 			}

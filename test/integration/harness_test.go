@@ -265,7 +265,7 @@ func TestFaultFlags(t *testing.T) {
 		t.Fatalf("object changed by a failed put: %+v, %v", obj, err)
 	}
 
-	nc := nodeclient.New()
+	nc := nodeclient.New("")
 	ctx := context.Background()
 	c.FailDeletes(0, true)
 	if err := nc.Delete(ctx, c.NodeURL(0), blobID); !errors.Is(err, nodeclient.ErrUnavailable) {

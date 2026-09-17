@@ -25,6 +25,7 @@ func TestLoadNodeTable(t *testing.T) {
 		"CAIRN_HEARTBEAT_INTERVAL": "250ms",
 		"CAIRN_SCRUB_INTERVAL":     "2m",
 		"CAIRN_SCRUB_DELAY":        "3ms",
+		"CAIRN_CLUSTER_SECRET":     "hunter2",
 	}
 	with := func(k, v string) map[string]string {
 		m := map[string]string{}
@@ -48,12 +49,12 @@ func TestLoadNodeTable(t *testing.T) {
 		{name: "all set", env: full, want: NodeConfig{
 			NodeID: "n1", Addr: "127.0.0.1:0", AdvertiseAddr: "http://10.0.0.1:9100",
 			DataDir: "/var/cairn", CoordinatorURL: "https://coord.example:9000", HeartbeatInterval: 250 * time.Millisecond,
-			ScrubInterval: 2 * time.Minute, ScrubDelay: 3 * time.Millisecond,
+			ScrubInterval: 2 * time.Minute, ScrubDelay: 3 * time.Millisecond, ClusterSecret: "hunter2",
 		}},
 		{name: "empty value uses default", env: with("CAIRN_ADDR", ""), want: NodeConfig{
 			NodeID: "n1", Addr: ":9100", AdvertiseAddr: "http://10.0.0.1:9100",
 			DataDir: "/var/cairn", CoordinatorURL: "https://coord.example:9000", HeartbeatInterval: 250 * time.Millisecond,
-			ScrubInterval: 2 * time.Minute, ScrubDelay: 3 * time.Millisecond,
+			ScrubInterval: 2 * time.Minute, ScrubDelay: 3 * time.Millisecond, ClusterSecret: "hunter2",
 		}},
 		{name: "bad interval", env: with("CAIRN_HEARTBEAT_INTERVAL", "soon"), bad: true},
 		{name: "zero interval", env: with("CAIRN_HEARTBEAT_INTERVAL", "0s"), bad: true},

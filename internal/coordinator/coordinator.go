@@ -78,7 +78,7 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 		nodes: nodes,
 		worker: &repair.Worker{
 			DB:        deps.Meta,
-			Client:    nodeclient.New(),
+			Client:    nodeclient.New(cfg.ClusterSecret),
 			Registry:  nodes,
 			Interval:  cfg.RepairInterval,
 			Grace:     cfg.RepairGrace,
@@ -97,6 +97,7 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 			NodeTimeout:   cfg.NodeTimeout,
 			RF:            cfg.RF,
 			W:             cfg.W,
+			ClusterSecret: cfg.ClusterSecret,
 			Metrics:       deps.Metrics,
 			Log:           deps.Log,
 		}),

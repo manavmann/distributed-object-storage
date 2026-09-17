@@ -38,7 +38,7 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := httptest.NewServer(storage.NewHandler(store, metrics.New(), log))
+	node := httptest.NewServer(storage.NewHandler(store, "", metrics.New(), log))
 	t.Cleanup(node.Close)
 
 	dataDir := filepath.Join(t.TempDir(), "coord")

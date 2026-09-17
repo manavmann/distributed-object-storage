@@ -185,7 +185,7 @@ func TestFailedQuorumStrayReclaimed(t *testing.T) {
 func seedBlob(t *testing.T, c *testcluster.Cluster, i int, id string, body []byte) {
 	t.Helper()
 	sum := sha256.Sum256(body)
-	if err := nodeclient.New().Put(context.Background(), c.NodeURL(i), id, bytes.NewReader(body), int64(len(body)), hex.EncodeToString(sum[:])); err != nil {
+	if err := nodeclient.New("").Put(context.Background(), c.NodeURL(i), id, bytes.NewReader(body), int64(len(body)), hex.EncodeToString(sum[:])); err != nil {
 		t.Fatalf("seed %s on %s: %v", id, c.NodeID(i), err)
 	}
 }

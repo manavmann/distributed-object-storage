@@ -19,6 +19,7 @@ import (
 //	CAIRN_WRITE_QUORUM       2         copies a PUT needs before it commits (W)
 //	CAIRN_REPAIR_INTERVAL    30s       how often the repair/GC worker ticks
 //	CAIRN_REPAIR_GRACE       60s       DOWN time before a node's blobs are re-replicated
+//	CAIRN_CLUSTER_SECRET     (unset)   shared secret nodes must present on /internal/heartbeat; off when unset
 type CoordinatorConfig struct {
 	Addr             string
 	DataDir          string
@@ -30,6 +31,7 @@ type CoordinatorConfig struct {
 	W                int
 	RepairInterval   time.Duration
 	RepairGrace      time.Duration
+	ClusterSecret    string
 }
 
 // LoadCoordinator builds a CoordinatorConfig from getenv (normally
@@ -42,8 +44,9 @@ func LoadCoordinator(getenv func(string) string) (CoordinatorConfig, error) {
 		return def
 	}
 	c := CoordinatorConfig{
-		Addr:    get("CAIRN_ADDR", ":9000"),
-		DataDir: get("CAIRN_DATA_DIR", "./data"),
+		Addr:          get("CAIRN_ADDR", ":9000"),
+		DataDir:       get("CAIRN_DATA_DIR", "./data"),
+		ClusterSecret: getenv("CAIRN_CLUSTER_SECRET"),
 	}
 	var err error
 	maxSize := get("CAIRN_MAX_OBJECT_SIZE", "67108864")

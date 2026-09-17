@@ -27,6 +27,9 @@ type NodeOptions struct {
 	// ScrubDelay the pause before each blob within a pass.
 	ScrubInterval time.Duration
 	ScrubDelay    time.Duration
+	// ClusterSecret, when non-empty, is required on every /blobs/* request
+	// and sent with every heartbeat.
+	ClusterSecret string
 	// Metrics receives cairn_node_blobs and cairn_node_free_bytes with
 	// every heartbeat and serves /metrics.
 	Metrics *metrics.Metrics
@@ -41,6 +44,7 @@ type Node struct {
 	interval      time.Duration
 	scrubInterval time.Duration
 	scrubDelay    time.Duration
+	secret        string
 	store         *Store
 	handler       http.Handler
 	metrics       *metrics.Metrics
@@ -64,8 +68,9 @@ func NewNode(dir string, opts NodeOptions) (*Node, error) {
 		interval:      opts.HeartbeatInterval,
 		scrubInterval: opts.ScrubInterval,
 		scrubDelay:    opts.ScrubDelay,
+		secret:        opts.ClusterSecret,
 		store:         store,
-		handler:       NewHandler(store, opts.Metrics, opts.Log),
+		handler:       NewHandler(store, opts.ClusterSecret, opts.Metrics, opts.Log),
 		metrics:       opts.Metrics,
 		log:           opts.Log,
 	}, nil
@@ -83,7 +88,7 @@ func (n *Node) StartHeartbeat(ctx context.Context, coordinatorURL, advertiseAddr
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunHeartbeat(ctx, &http.Client{Timeout: n.interval}, coordinatorURL, n.interval,
+		RunHeartbeat(ctx, &http.Client{Timeout: n.interval}, coordinatorURL, n.secret, n.interval,
 			func() Heartbeat { return n.status(advertiseAddr) }, n.acked, n.log)
 	}()
 	return done

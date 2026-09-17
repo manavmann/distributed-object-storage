@@ -62,6 +62,9 @@ type Opts struct {
 	// ever scrub.
 	ScrubInterval time.Duration
 	ScrubDelay    time.Duration
+	// ClusterSecret, when non-empty, is the CAIRN_CLUSTER_SECRET both the
+	// coordinator and every node run with. Default none.
+	ClusterSecret string
 }
 
 // Cluster is a running coordinator plus its nodes. Its methods must be
@@ -161,6 +164,7 @@ func New(t *testing.T, opts Opts) *Cluster {
 			W:                opts.W,
 			RepairInterval:   opts.RepairInterval,
 			RepairGrace:      opts.RepairGrace,
+			ClusterSecret:    opts.ClusterSecret,
 		},
 	}
 	if err := c.cfg.Validate(); err != nil {
@@ -254,7 +258,8 @@ func (c *Cluster) startNode(n *node) {
 	c.t.Helper()
 	sn, err := storage.NewNode(n.dir, storage.NodeOptions{
 		ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval,
-		ScrubInterval: c.opts.ScrubInterval, ScrubDelay: c.opts.ScrubDelay, Metrics: metrics.New(), Log: c.log,
+		ScrubInterval: c.opts.ScrubInterval, ScrubDelay: c.opts.ScrubDelay, ClusterSecret: c.opts.ClusterSecret,
+		Metrics: metrics.New(), Log: c.log,
 	})
 	if err != nil {
 		c.t.Fatal(err)

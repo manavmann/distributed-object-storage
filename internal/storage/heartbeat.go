@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/manavmann/distributed-object-storage/internal/events"
+	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"log/slog"
 	"net/http"
 	"time"
@@ -26,14 +27,15 @@ type Heartbeat struct {
 // immediately and then every interval until ctx is done, calling acked
 // with each heartbeat the coordinator accepted. A failed post is logged
 // and the loop carries on; the coordinator's health monitor, not the
-// node, decides what a missed heartbeat means.
-func RunHeartbeat(ctx context.Context, client *http.Client, coordinatorURL string, interval time.Duration, status func() Heartbeat, acked func(Heartbeat), log *slog.Logger) {
+// node, decides what a missed heartbeat means. secret, when non-empty,
+// is sent as a bearer token on every post.
+func RunHeartbeat(ctx context.Context, client *http.Client, coordinatorURL, secret string, interval time.Duration, status func() Heartbeat, acked func(Heartbeat), log *slog.Logger) {
 	url := coordinatorURL + "/internal/heartbeat"
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		hb := status()
-		if err := postHeartbeat(ctx, client, url, hb); err != nil {
+		if err := postHeartbeat(ctx, client, url, secret, hb); err != nil {
 			log.Warn(events.NodeHeartbeatFailed, "coordinator", url, "err", err)
 		} else {
 			acked(hb)
@@ -46,7 +48,7 @@ func RunHeartbeat(ctx context.Context, client *http.Client, coordinatorURL strin
 	}
 }
 
-func postHeartbeat(ctx context.Context, client *http.Client, url string, hb Heartbeat) error {
+func postHeartbeat(ctx context.Context, client *http.Client, url, secret string, hb Heartbeat) error {
 	body, err := json.Marshal(hb)
 	if err != nil {
 		return err
@@ -56,6 +58,7 @@ func postHeartbeat(ctx context.Context, client *http.Client, url string, hb Hear
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	httpx.SetBearer(req, secret)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

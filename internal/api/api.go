@@ -44,10 +44,13 @@ type Config struct {
 	NodeTimeout time.Duration
 	// RF is how many copies a PUT tries to write; W how many must be
 	// acknowledged before it commits. 1 <= W <= RF.
-	RF      int
-	W       int
-	Metrics *metrics.Metrics
-	Log     *slog.Logger
+	RF int
+	W  int
+	// ClusterSecret, when non-empty, is required on /internal/heartbeat and
+	// sent on every request to a node.
+	ClusterSecret string
+	Metrics       *metrics.Metrics
+	Log           *slog.Logger
 }
 
 // Server holds the handler state.
@@ -87,7 +90,7 @@ type putResponse struct {
 //	HEAD   /v1/{bucket}/{key...}  200 same headers, no body | 400 | 404 | 503 NoHealthyReplica
 //	DELETE /v1/{bucket}/{key...}  204 | 400 | 404 no bucket
 //	GET    /healthz               200
-//	POST   /internal/heartbeat    204 | 400 InvalidHeartbeat
+//	POST   /internal/heartbeat    204 | 400 InvalidHeartbeat | 401 without the cluster secret, when one is set
 //	GET    /cluster/status        200 {nodes:[...],under_replicated: blobs with fewer than RF UP holders}; each node carries scrub_failures, the corrupt copies it has reported
 //	GET    /cluster/locate        200 {blob_id,size,sha256,replicas,placement}; ?bucket=&key= | 400 | 404
 //	GET    /metrics               200 Prometheus text format
@@ -95,7 +98,7 @@ type putResponse struct {
 // Every response carries X-Request-ID and every request is logged and
 // counted under its route pattern.
 func NewHandler(cfg Config) http.Handler {
-	client := nodeclient.New()
+	client := nodeclient.New(cfg.ClusterSecret)
 	s := &Server{
 		meta:        cfg.Meta,
 		nodes:       cfg.Nodes,
@@ -119,7 +122,7 @@ func NewHandler(cfg Config) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /internal/heartbeat", s.handleHeartbeat)
+	mux.Handle("POST /internal/heartbeat", httpx.BearerAuth(cfg.ClusterSecret, http.HandlerFunc(s.handleHeartbeat)))
 	mux.HandleFunc("GET /cluster/status", s.handleClusterStatus)
 	mux.HandleFunc("GET /cluster/locate", s.handleLocate)
 	mux.Handle("GET /metrics", cfg.Metrics.Handler())

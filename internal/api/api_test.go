@@ -497,3 +497,32 @@ func TestUploadSlotWaitCancelled(t *testing.T) {
 		t.Fatalf("held PUT: %v", err)
 	}
 }
+
+// TestHeartbeatRequiresSecret runs a cluster with a cluster secret and
+// checks that /internal/heartbeat is closed to a bare POST, open with the
+// secret, and that the public routes never ask for it.
+func TestHeartbeatRequiresSecret(t *testing.T) {
+	c := testcluster.New(t, testcluster.Opts{Nodes: 1, RF: 1, W: 1, ClusterSecret: "s3cret"})
+	body, err := json.Marshal(storage.Heartbeat{NodeID: "n2", Addr: "http://n2:9000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hdr := range [][]string{nil, {"Authorization", "Bearer wrong"}} {
+		resp, out := do(t, c, http.MethodPost, "/internal/heartbeat", bytes.NewReader(body), append([]string{"Content-Type", "application/json"}, hdr...)...)
+		if resp.StatusCode != http.StatusUnauthorized || errCode(t, out) != "unauthorized" {
+			t.Fatalf("heartbeat with %v = %d %s, want 401 unauthorized", hdr, resp.StatusCode, out)
+		}
+	}
+	if nodes, err := c.Meta().ListNodes(context.Background()); err != nil || len(nodes) != 1 {
+		t.Fatalf("unauthorized heartbeat registered a node: %+v, %v", nodes, err)
+	}
+	resp, out := do(t, c, http.MethodPost, "/internal/heartbeat", bytes.NewReader(body), "Content-Type", "application/json", "Authorization", "Bearer s3cret")
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("heartbeat with secret = %d %s", resp.StatusCode, out)
+	}
+	for _, path := range []string{"/healthz", "/cluster/status", "/metrics"} {
+		if resp, out := do(t, c, http.MethodGet, path, nil); resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s without secret = %d %s", path, resp.StatusCode, out)
+		}
+	}
+}
