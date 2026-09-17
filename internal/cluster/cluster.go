@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"log/slog"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 )
 
 // ErrInvalidHeartbeat is wrapped by every heartbeat the registry rejects.
@@ -54,6 +56,7 @@ type Node struct {
 type Registry struct {
 	db      *meta.DB
 	log     *slog.Logger
+	metrics *metrics.Metrics
 	now     func() time.Time
 	timeout time.Duration
 
@@ -64,13 +67,14 @@ type Registry struct {
 // Load seeds a registry from meta.ListNodes. Every node keeps its persisted
 // status and gets lastSeen=now(), so a node that was UP has one timeout to
 // heartbeat again before the monitor marks it DOWN. now and timeout are
-// injectable so tests can drive a fake clock.
-func Load(ctx context.Context, db *meta.DB, timeout time.Duration, now func() time.Time, log *slog.Logger) (*Registry, error) {
+// injectable so tests can drive a fake clock. The nodes_up and
+// nodes_total gauges on m are set here and on every status transition.
+func Load(ctx context.Context, db *meta.DB, timeout time.Duration, now func() time.Time, m *metrics.Metrics, log *slog.Logger) (*Registry, error) {
 	rows, err := db.ListNodes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	r := &Registry{db: db, log: log, now: now, timeout: timeout, nodes: make(map[string]*Node, len(rows))}
+	r := &Registry{db: db, log: log, metrics: m, now: now, timeout: timeout, nodes: make(map[string]*Node, len(rows))}
 	seen := now()
 	for _, row := range rows {
 		r.nodes[row.ID] = &Node{
@@ -79,6 +83,7 @@ func Load(ctx context.Context, db *meta.DB, timeout time.Duration, now func() ti
 			LastSeen: seen, StatusChangedAt: time.UnixMilli(row.StatusChangedAt),
 		}
 	}
+	r.refreshGauges()
 	return r, nil
 }
 
@@ -115,13 +120,16 @@ func (r *Registry) Heartbeat(ctx context.Context, hb Heartbeat) error {
 		}
 		n.Status = StatusUp
 		n.StatusChangedAt = now
-		r.log.Info("node_up", "node_id", hb.NodeID, "addr", hb.Addr)
+		r.log.Info(events.NodeUp, "node_id", hb.NodeID, "addr", hb.Addr)
 	}
 	n.Addr = hb.Addr
 	n.FreeBytes = hb.FreeBytes
 	n.BlobCount = hb.BlobCount
 	n.LastSeen = now
 	r.nodes[hb.NodeID] = n
+	if !known || wasDown {
+		r.refreshGauges()
+	}
 	return nil
 }
 
@@ -151,12 +159,13 @@ func (r *Registry) sweep(ctx context.Context) {
 			continue
 		}
 		if err := r.db.SetNodeStatus(ctx, n.ID, StatusDown); err != nil {
-			r.log.Error("node_down_persist_failed", "node_id", n.ID, "err", err)
+			r.log.Error(events.NodeDownPersistFailed, "node_id", n.ID, "err", err)
 			continue
 		}
 		n.Status = StatusDown
 		n.StatusChangedAt = now
-		r.log.Warn("node_down", "node_id", n.ID, "addr", n.Addr, "last_seen", n.LastSeen)
+		r.log.Warn(events.NodeDown, "node_id", n.ID, "addr", n.Addr, "last_seen", n.LastSeen)
+		r.refreshGauges()
 	}
 }
 
@@ -199,4 +208,17 @@ func (r *Registry) Get(id string) (Node, bool) {
 
 func sortByID(nodes []Node) {
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+}
+
+// refreshGauges sets nodes_up and nodes_total from the map. The caller
+// holds mu.
+func (r *Registry) refreshGauges() {
+	up := 0
+	for _, n := range r.nodes {
+		if n.Status == StatusUp {
+			up++
+		}
+	}
+	r.metrics.NodesUp.Set(float64(up))
+	r.metrics.NodesTotal.Set(float64(len(r.nodes)))
 }

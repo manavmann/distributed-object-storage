@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"log/slog"
 	"math/rand/v2"
 
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
 )
 
@@ -23,10 +25,12 @@ type Getter interface {
 }
 
 // Reader opens an object's blob from whichever replica can serve it.
+// Metrics counts the corrupt copies it finds.
 type Reader struct {
-	Meta   *meta.DB
-	Client Getter
-	Log    *slog.Logger
+	Meta    *meta.DB
+	Client  Getter
+	Metrics *metrics.Metrics
+	Log     *slog.Logger
 }
 
 // Open returns a verified stream of obj's blob and the id of the node
@@ -72,7 +76,8 @@ func (r *Reader) open(ctx context.Context, obj meta.Object) (*nodeclient.Blob, s
 		switch {
 		case errors.Is(err, nodeclient.ErrIntegrity):
 			allMissing = false
-			r.Log.Warn("integrity_failure", "blob_id", obj.BlobID, "node_id", rep.NodeID, "err", err)
+			r.Metrics.IntegrityFailures.Inc()
+			r.Log.Warn(events.IntegrityFailure, "blob_id", obj.BlobID, "node_id", rep.NodeID, "err", err)
 			if derr := r.Meta.DropReplica(ctx, obj.BlobID, rep.NodeID); derr != nil {
 				return nil, "", false, derr
 			}
@@ -85,7 +90,7 @@ func (r *Reader) open(ctx context.Context, obj meta.Object) (*nodeclient.Blob, s
 		}
 		allMissing = false
 		if blob.Length != obj.Size || blob.SHA256 != obj.SHA256 {
-			r.Log.Warn("replica_mismatch", "blob_id", obj.BlobID, "node_id", rep.NodeID,
+			r.Log.Warn(events.ReplicaMismatch, "blob_id", obj.BlobID, "node_id", rep.NodeID,
 				"length", blob.Length, "sha256", blob.SHA256, "want_length", obj.Size, "want_sha256", obj.SHA256)
 			blob.Close()
 			continue

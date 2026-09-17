@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/coordinator"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 )
 
 const (
@@ -32,25 +34,25 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	cfg, err := config.LoadCoordinator(os.Getenv)
 	if err != nil {
-		log.Error("coordinator.config", "err", err)
+		log.Error(events.CoordinatorConfig, "err", err)
 		os.Exit(2)
 	}
 	if *healthcheck {
 		if err := httpx.Healthcheck(cfg.Addr); err != nil {
-			log.Error("coordinator.healthcheck", "err", err)
+			log.Error(events.CoordinatorHealthcheck, "err", err)
 			os.Exit(1)
 		}
 		return
 	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
-		log.Error("coordinator.listen", "addr", cfg.Addr, "err", err)
+		log.Error(events.CoordinatorListen, "addr", cfg.Addr, "err", err)
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := serve(ctx, cfg, ln, log); err != nil {
-		log.Error("coordinator.exit", "err", err)
+		log.Error(events.CoordinatorExit, "err", err)
 		os.Exit(1)
 	}
 }
@@ -66,7 +68,7 @@ func serve(ctx context.Context, cfg config.CoordinatorConfig, ln net.Listener, l
 		return err
 	}
 	defer db.Close()
-	c, err := coordinator.New(cfg, coordinator.Deps{Meta: db, Log: log})
+	c, err := coordinator.New(cfg, coordinator.Deps{Meta: db, Metrics: metrics.New(), Log: log})
 	if err != nil {
 		return err
 	}
@@ -76,7 +78,7 @@ func serve(ctx context.Context, cfg config.CoordinatorConfig, ln net.Listener, l
 		Handler:           c.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Info("coordinator.start", "version", version, "addr", ln.Addr().String(),
+	log.Info(events.CoordinatorStart, "version", version, "addr", ln.Addr().String(),
 		"data_dir", cfg.DataDir, "heartbeat_timeout", cfg.HeartbeatTimeout)
 
 	serveErr := make(chan error, 1)
@@ -87,7 +89,7 @@ func serve(ctx context.Context, cfg config.CoordinatorConfig, ln net.Listener, l
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 	}
-	log.Info("coordinator.shutdown")
+	log.Info(events.CoordinatorShutdown)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err = srv.Shutdown(shutdownCtx)

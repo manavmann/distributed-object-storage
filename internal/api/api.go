@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
 	"github.com/manavmann/distributed-object-storage/internal/placement"
 	"github.com/manavmann/distributed-object-storage/internal/replication"
@@ -42,9 +44,10 @@ type Config struct {
 	NodeTimeout time.Duration
 	// RF is how many copies a PUT tries to write; W how many must be
 	// acknowledged before it commits. 1 <= W <= RF.
-	RF  int
-	W   int
-	Log *slog.Logger
+	RF      int
+	W       int
+	Metrics *metrics.Metrics
+	Log     *slog.Logger
 }
 
 // Server holds the handler state.
@@ -58,6 +61,7 @@ type Server struct {
 	maxSize     int64
 	nodeTimeout time.Duration
 	rf          int
+	metrics     *metrics.Metrics
 	uploads     chan struct{}
 	log         *slog.Logger
 }
@@ -86,8 +90,10 @@ type putResponse struct {
 //	POST   /internal/heartbeat    204 | 400 InvalidHeartbeat
 //	GET    /cluster/status        200 {nodes:[...],under_replicated: blobs with fewer than RF UP holders}
 //	GET    /cluster/locate        200 {blob_id,size,sha256,replicas,placement}; ?bucket=&key= | 400 | 404
+//	GET    /metrics               200 Prometheus text format
 //
-// Every response carries X-Request-ID and every request is logged.
+// Every response carries X-Request-ID and every request is logged and
+// counted under its route pattern.
 func NewHandler(cfg Config) http.Handler {
 	client := nodeclient.New()
 	s := &Server{
@@ -95,11 +101,12 @@ func NewHandler(cfg Config) http.Handler {
 		nodes:       cfg.Nodes,
 		client:      client,
 		writer:      &replication.Writer{N: cfg.RF, W: cfg.W, Client: client, Registry: cfg.Nodes, Timeout: cfg.NodeTimeout},
-		reader:      &replication.Reader{Meta: cfg.Meta, Client: client, Log: cfg.Log},
+		reader:      &replication.Reader{Meta: cfg.Meta, Client: client, Metrics: cfg.Metrics, Log: cfg.Log},
 		spoolDir:    cfg.SpoolDir,
 		maxSize:     cfg.MaxObjectSize,
 		nodeTimeout: cfg.NodeTimeout,
 		rf:          cfg.RF,
+		metrics:     cfg.Metrics,
 		uploads:     make(chan struct{}, cfg.MaxUploads),
 		log:         cfg.Log,
 	}
@@ -115,7 +122,8 @@ func NewHandler(cfg Config) http.Handler {
 	mux.HandleFunc("POST /internal/heartbeat", s.handleHeartbeat)
 	mux.HandleFunc("GET /cluster/status", s.handleClusterStatus)
 	mux.HandleFunc("GET /cluster/locate", s.handleLocate)
-	return httpx.RequestID(httpx.Logging(cfg.Log, mux))
+	mux.Handle("GET /metrics", cfg.Metrics.Handler())
+	return httpx.RequestID(httpx.Logging(cfg.Log, httpx.Metrics(cfg.Metrics, mux)))
 }
 
 // statusNode is one entry of the /cluster/status response.
@@ -305,8 +313,10 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := s.writer.Write(r.Context(), key, blobID, size, sum, spool)
+	s.metrics.ReplicaWrites.WithLabelValues(metrics.ResultOK).Add(float64(len(res.Succeeded)))
+	s.metrics.ReplicaWrites.WithLabelValues(metrics.ResultFailed).Add(float64(len(res.Failed)))
 	for _, a := range res.Failed {
-		s.log.Warn("replica_write_failed", "request_id", httpx.RequestIDFrom(r.Context()),
+		s.log.Warn(events.ReplicaWriteFailed, "request_id", httpx.RequestIDFrom(r.Context()),
 			"blob_id", blobID, "node_id", a.NodeID, "err", a.Err)
 	}
 	if err != nil {
@@ -342,7 +352,7 @@ func (s *Server) abortUpload(r *http.Request, blobID string, nodeIDs []string) {
 	// The client may already be gone, so the queueing must not die with
 	// its request.
 	if err := s.meta.AbortUpload(context.WithoutCancel(r.Context()), blobID, nodeIDs); err != nil {
-		s.log.Error("api.orphan_blob", "request_id", httpx.RequestIDFrom(r.Context()),
+		s.log.Error(events.OrphanBlob, "request_id", httpx.RequestIDFrom(r.Context()),
 			"blob_id", blobID, "node_ids", nodeIDs, "err", err)
 	}
 }
@@ -466,7 +476,7 @@ func (s *Server) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := io.Copy(w, blob); err != nil {
-		s.log.Warn("api.stream_aborted", "request_id", httpx.RequestIDFrom(r.Context()), "err", err)
+		s.log.Warn(events.StreamAborted, "request_id", httpx.RequestIDFrom(r.Context()), "err", err)
 	}
 }
 
@@ -509,6 +519,6 @@ func newBlobID() string {
 // because the response has already been decided by then.
 func (s *Server) removeSpool(r *http.Request, path string) {
 	if err := os.Remove(path); err != nil {
-		s.log.Error("api.spool_remove", "request_id", httpx.RequestIDFrom(r.Context()), "path", path, "err", err)
+		s.log.Error(events.SpoolRemove, "request_id", httpx.RequestIDFrom(r.Context()), "path", path, "err", err)
 	}
 }

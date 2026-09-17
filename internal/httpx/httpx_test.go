@@ -3,11 +3,15 @@ package httpx
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"testing"
+
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestRequestIDHonoursHeader(t *testing.T) {
@@ -126,5 +130,34 @@ func TestWriteJSON(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != "{\"n\":1}\n" {
 		t.Fatalf("body = %q", got)
+	}
+}
+
+// TestMetricsLabelsRouteByPattern sends two requests to different paths
+// under one pattern and one to no pattern, wrapped exactly as the
+// binaries wrap their muxes, and checks the counter is keyed by pattern
+// and status.
+func TestMetricsLabelsRouteByPattern(t *testing.T) {
+	m := metrics.New()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/{bucket}/{key...}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	h := RequestID(Logging(slog.New(slog.NewTextHandler(io.Discard, nil)), Metrics(m, mux)))
+	for _, path := range []string{"/v1/b/a/b/c", "/v1/other/k", "/nowhere"} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	const pattern = "GET /v1/{bucket}/{key...}"
+	if got := testutil.ToFloat64(m.HTTPRequests.WithLabelValues(pattern, "GET", "418")); got != 2 {
+		t.Fatalf("requests{%s,GET,418} = %v, want 2", pattern, got)
+	}
+	if got := testutil.ToFloat64(m.HTTPRequests.WithLabelValues("", "GET", "404")); got != 1 {
+		t.Fatalf("requests{\"\",GET,404} = %v, want 1", got)
+	}
+	if n := testutil.CollectAndCount(m.HTTPRequests); n != 2 {
+		t.Fatalf("HTTPRequests has %d series, want 2 (no raw paths)", n)
+	}
+	if n := testutil.CollectAndCount(m.HTTPDuration); n != 2 {
+		t.Fatalf("HTTPDuration has %d series, want 2", n)
 	}
 }

@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -46,7 +47,7 @@ func openMeta(t *testing.T) *meta.DB {
 func newRegistry(t *testing.T, db *meta.DB) (*Registry, *clock) {
 	t.Helper()
 	clk := &clock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	r, err := Load(context.Background(), db, timeout, clk.now, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r, err := Load(context.Background(), db, timeout, clk.now, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

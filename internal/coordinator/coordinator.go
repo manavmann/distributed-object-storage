@@ -7,6 +7,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/config"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
 	"github.com/manavmann/distributed-object-storage/internal/repair"
 )
@@ -32,8 +34,9 @@ const (
 
 // Deps are the parts the coordinator uses but does not own.
 type Deps struct {
-	Meta *meta.DB
-	Log  *slog.Logger
+	Meta    *meta.DB
+	Metrics *metrics.Metrics
+	Log     *slog.Logger
 }
 
 // Coordinator is a control plane minus its listener.
@@ -64,10 +67,10 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 		return nil, fmt.Errorf("coordinator: sweep uploads: %w", err)
 	}
 	for _, u := range swept {
-		deps.Log.Info("upload_intent_swept", "blob_id", u.BlobID, "bucket", u.Bucket, "key", u.Key,
+		deps.Log.Info(events.UploadIntentSwept, "blob_id", u.BlobID, "bucket", u.Bucket, "key", u.Key,
 			"started_at", time.UnixMilli(u.StartedAt).UTC().Format(time.RFC3339Nano))
 	}
-	nodes, err := cluster.Load(context.Background(), deps.Meta, cfg.HeartbeatTimeout, time.Now, deps.Log)
+	nodes, err := cluster.Load(context.Background(), deps.Meta, cfg.HeartbeatTimeout, time.Now, deps.Metrics, deps.Log)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +85,7 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 			RF:        cfg.RF,
 			BatchSize: batchSize,
 			Timeout:   cfg.NodeTimeout,
+			Metrics:   deps.Metrics,
 			Log:       deps.Log,
 		},
 		handler: api.NewHandler(api.Config{
@@ -93,6 +97,7 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 			NodeTimeout:   cfg.NodeTimeout,
 			RF:            cfg.RF,
 			W:             cfg.W,
+			Metrics:       deps.Metrics,
 			Log:           deps.Log,
 		}),
 	}, nil

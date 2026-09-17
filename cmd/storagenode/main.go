@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/manavmann/distributed-object-storage/internal/config"
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"github.com/manavmann/distributed-object-storage/internal/storage"
 )
 
@@ -30,25 +32,25 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	cfg, err := config.LoadNode(os.Getenv)
 	if err != nil {
-		log.Error("node.config", "err", err)
+		log.Error(events.NodeConfig, "err", err)
 		os.Exit(2)
 	}
 	if *healthcheck {
 		if err := httpx.Healthcheck(cfg.Addr); err != nil {
-			log.Error("node.healthcheck", "err", err)
+			log.Error(events.NodeHealthcheck, "err", err)
 			os.Exit(1)
 		}
 		return
 	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
-		log.Error("node.listen", "addr", cfg.Addr, "err", err)
+		log.Error(events.NodeListen, "addr", cfg.Addr, "err", err)
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := serve(ctx, cfg, ln, log); err != nil {
-		log.Error("node.exit", "err", err)
+		log.Error(events.NodeExit, "err", err)
 		os.Exit(1)
 	}
 }
@@ -57,7 +59,7 @@ func main() {
 // requests and waits for the heartbeat loop before returning.
 func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slog.Logger) error {
 	node, err := storage.NewNode(cfg.DataDir, storage.NodeOptions{
-		ID: cfg.NodeID, HeartbeatInterval: cfg.HeartbeatInterval, Log: log,
+		ID: cfg.NodeID, HeartbeatInterval: cfg.HeartbeatInterval, Metrics: metrics.New(), Log: log,
 	})
 	if err != nil {
 		return err
@@ -66,7 +68,7 @@ func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slo
 		Handler:           node.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Info("node.start", "version", version, "node_id", cfg.NodeID, "addr", ln.Addr().String(),
+	log.Info(events.NodeStart, "version", version, "node_id", cfg.NodeID, "addr", ln.Addr().String(),
 		"data_dir", cfg.DataDir, "coordinator", cfg.CoordinatorURL)
 
 	hbCtx, stopHeartbeat := context.WithCancel(ctx)
@@ -82,7 +84,7 @@ func serve(ctx context.Context, cfg config.NodeConfig, ln net.Listener, log *slo
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 	}
-	log.Info("node.shutdown")
+	log.Info(events.NodeShutdown)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	err = srv.Shutdown(shutdownCtx)

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"net/http"
@@ -44,7 +45,7 @@ func TestBatchSizeRespected(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	reg, err := cluster.Load(ctx, db, time.Minute, time.Now, log)
+	reg, err := cluster.Load(ctx, db, time.Minute, time.Now, metrics.New(), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func TestBatchSizeRespected(t *testing.T) {
 
 	w := &Worker{
 		DB: db, Client: nodeclient.New(), Registry: reg,
-		Interval: time.Minute, Grace: time.Minute, BatchSize: 2, Timeout: time.Second, Log: log,
+		Interval: time.Minute, Grace: time.Minute, BatchSize: 2, Timeout: time.Second, Metrics: metrics.New(), Log: log,
 	}
 	for tick, wantSent := 1, 2; tick <= 3; tick++ {
 		w.tick(ctx)
@@ -78,7 +79,7 @@ func TestBatchSizeRespected(t *testing.T) {
 func startNode(t *testing.T, id string, wrap func(http.Handler) http.Handler) (url, dir string) {
 	t.Helper()
 	dir = t.TempDir()
-	sn, err := storage.NewNode(dir, storage.NodeOptions{ID: id, HeartbeatInterval: time.Minute, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	sn, err := storage.NewNode(dir, storage.NodeOptions{ID: id, HeartbeatInterval: time.Minute, Metrics: metrics.New(), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,7 @@ func TestRepairStaleCopyQueued(t *testing.T) {
 			next.ServeHTTP(w, r)
 		})
 	})
-	reg, err := cluster.Load(ctx, db, time.Minute, time.Now, log)
+	reg, err := cluster.Load(ctx, db, time.Minute, time.Now, metrics.New(), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestRepairStaleCopyQueued(t *testing.T) {
 
 	w := &Worker{
 		DB: db, Client: client, Registry: reg,
-		Interval: time.Minute, Grace: time.Millisecond, RF: 2, BatchSize: 8, Timeout: 5 * time.Second, Log: log,
+		Interval: time.Minute, Grace: time.Millisecond, RF: 2, BatchSize: 8, Timeout: 5 * time.Second, Metrics: metrics.New(), Log: log,
 	}
 	w.tick(ctx)
 	if reps, err := db.Replicas(ctx, blobID); err != nil || len(reps) != 0 {
@@ -178,7 +179,7 @@ func TestRepairCorruptSourceDropped(t *testing.T) {
 	identity := func(h http.Handler) http.Handler { return h }
 	sourceURL, sourceDir := startNode(t, "src", identity)
 	targetURL, targetDir := startNode(t, "dst", identity)
-	reg, err := cluster.Load(ctx, db, time.Minute, time.Now, log)
+	reg, err := cluster.Load(ctx, db, time.Minute, time.Now, metrics.New(), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestRepairCorruptSourceDropped(t *testing.T) {
 
 	w := &Worker{
 		DB: db, Client: client, Registry: reg,
-		Interval: time.Minute, Grace: time.Millisecond, RF: 2, BatchSize: 8, Timeout: 5 * time.Second, Log: log,
+		Interval: time.Minute, Grace: time.Millisecond, RF: 2, BatchSize: 8, Timeout: 5 * time.Second, Metrics: metrics.New(), Log: log,
 	}
 	w.tick(ctx)
 	if reps, err := db.Replicas(ctx, blobID); err != nil || len(reps) != 0 {

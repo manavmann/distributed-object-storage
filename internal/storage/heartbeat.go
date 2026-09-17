@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"log/slog"
 	"net/http"
 	"time"
@@ -28,7 +29,7 @@ func RunHeartbeat(ctx context.Context, client *http.Client, coordinatorURL strin
 	defer t.Stop()
 	for {
 		if err := postHeartbeat(ctx, client, url, status()); err != nil {
-			log.Warn("node.heartbeat_failed", "coordinator", url, "err", err)
+			log.Warn(events.NodeHeartbeatFailed, "coordinator", url, "err", err)
 		}
 		select {
 		case <-ctx.Done():

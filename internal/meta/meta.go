@@ -387,6 +387,15 @@ func (d *DB) ListObjects(ctx context.Context, bucket, prefix, startAfter string,
 	return objs, truncated, nil
 }
 
+// CountObjects returns the number of objects across every bucket.
+func (d *DB) CountObjects(ctx context.Context) (int, error) {
+	var n int
+	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM objects`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("meta: count objects: %w", err)
+	}
+	return n, nil
+}
+
 // Replicas returns the nodes that hold blobID, ordered by node id.
 func (d *DB) Replicas(ctx context.Context, blobID string) ([]Replica, error) {
 	var out []Replica

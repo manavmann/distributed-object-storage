@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"net"
@@ -26,7 +27,7 @@ func newNode(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(storage.NewHandler(store, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv := httptest.NewServer(storage.NewHandler(store, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }

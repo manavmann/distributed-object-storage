@@ -16,3 +16,21 @@ Consequences: no cgo, so `go build` and `-race` work on every platform
 without a C toolchain. The driver pulls in a handful of indirect modernc.org
 modules. One connection (SetMaxOpenConns(1)) serializes all access, which is
 what the single-writer coordinator wants anyway.
+
+## github.com/prometheus/client_golang for metrics
+
+Context: both binaries need a /metrics endpoint an operator can scrape,
+with counters, gauges and a latency histogram. CLAUDE.md names
+prometheus/client_golang as the one allowed metrics dependency.
+
+Decision: use prometheus/client_golang directly. internal/metrics builds
+every collector on its own prometheus.NewRegistry() (no promauto, no
+default registry) so tests can build a registry per cluster, and serves it
+with promhttp.HandlerFor. HTTP series are labelled by mux pattern
+(r.Pattern), never the raw path, so cardinality is bounded by the route
+table.
+
+Consequences: the module pulls in prometheus/client_model, common,
+procfs and google.golang.org/protobuf as indirect dependencies. The
+prometheus/testutil package from the same module is used in tests to read
+collector values without scraping.

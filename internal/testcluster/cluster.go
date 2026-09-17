@@ -3,6 +3,7 @@ package testcluster
 import (
 	"context"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -166,7 +167,7 @@ func (c *Cluster) startCoordinator() {
 		c.t.Fatal(err)
 	}
 	c.meta = db
-	coord, err := coordinator.New(c.cfg, coordinator.Deps{Meta: db, Log: c.log})
+	coord, err := coordinator.New(c.cfg, coordinator.Deps{Meta: db, Metrics: metrics.New(), Log: c.log})
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func (c *Cluster) stopCoordinator() {
 func (c *Cluster) startNode(n *node) {
 	c.t.Helper()
 	sn, err := storage.NewNode(n.dir, storage.NodeOptions{
-		ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval, Log: c.log,
+		ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval, Metrics: metrics.New(), Log: c.log,
 	})
 	if err != nil {
 		c.t.Fatal(err)
@@ -249,7 +250,7 @@ func (c *Cluster) RestartCoordinator() {
 		}
 		c.stopHeartbeat(n)
 		sn, err := storage.NewNode(n.dir, storage.NodeOptions{
-			ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval, Log: c.log,
+			ID: n.id, HeartbeatInterval: c.opts.HeartbeatInterval, Metrics: metrics.New(), Log: c.log,
 		})
 		if err != nil {
 			c.t.Fatal(err)

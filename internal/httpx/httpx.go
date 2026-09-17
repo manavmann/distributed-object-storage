@@ -7,8 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/manavmann/distributed-object-storage/internal/events"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -47,7 +50,7 @@ func Logging(log *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		log.LogAttrs(r.Context(), slog.LevelInfo, "http.request",
+		log.LogAttrs(r.Context(), slog.LevelInfo, events.HTTPRequest,
 			slog.String("request_id", RequestIDFrom(r.Context())),
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
@@ -81,7 +84,7 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		slog.Warn("http.write_json", "err", err)
+		slog.Warn(events.HTTPWriteJSON, "err", err)
 	}
 }
 
@@ -102,5 +105,21 @@ func WriteError(w http.ResponseWriter, r *http.Request, status int, code, msg st
 	WriteJSON(w, status, ErrorBody{
 		Error:     ErrorDetail{Code: code, Message: msg},
 		RequestID: RequestIDFrom(r.Context()),
+	})
+}
+
+// Metrics records each response in m.HTTPRequests and m.HTTPDuration
+// under the mux pattern that matched, never the raw path, so the label
+// set stays as small as the route table. It must wrap the mux directly
+// (inside RequestID), because the mux writes the pattern onto the very
+// *Request it receives and a middleware that clones the request would
+// hide it. A request no pattern matched is recorded under route "".
+func Metrics(m *metrics.Metrics, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		m.HTTPRequests.WithLabelValues(r.Pattern, r.Method, strconv.Itoa(rec.status)).Inc()
+		m.HTTPDuration.WithLabelValues(r.Pattern, r.Method).Observe(time.Since(start).Seconds())
 	})
 }

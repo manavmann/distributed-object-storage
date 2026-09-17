@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -359,13 +360,13 @@ func TestNoHealthyNodesOnPut(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	empty, err := cluster.Load(context.Background(), db, time.Minute, time.Now, log)
+	empty, err := cluster.Load(context.Background(), db, time.Minute, time.Now, metrics.New(), log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler := api.NewHandler(api.Config{
 		Meta: c.Meta(), Nodes: empty, SpoolDir: t.TempDir(),
-		MaxObjectSize: testcluster.MaxObjectSize, MaxUploads: 1, NodeTimeout: time.Second, RF: 1, W: 1, Log: log,
+		MaxObjectSize: testcluster.MaxObjectSize, MaxUploads: 1, NodeTimeout: time.Second, RF: 1, W: 1, Metrics: metrics.New(), Log: log,
 	})
 	req := httptest.NewRequest(http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x")))
 	rec := httptest.NewRecorder()

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"os"
@@ -76,7 +77,7 @@ func newRegistry(t *testing.T, n int) *cluster.Registry {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	reg, err := cluster.Load(context.Background(), db, time.Minute, time.Now, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	reg, err := cluster.Load(context.Background(), db, time.Minute, time.Now, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

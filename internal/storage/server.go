@@ -3,12 +3,14 @@ package storage
 import (
 	"encoding/hex"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 )
 
 // ContentSHA256Header carries the hex SHA-256 of a blob's payload. A PUT may
@@ -36,9 +38,11 @@ type server struct {
 //	HEAD   /blobs/{id}  200 headers only | 404 | 500
 //	DELETE /blobs/{id}  204 quarantined | 404 | 500
 //	GET    /healthz     200
+//	GET    /metrics     200 Prometheus text format
 //
-// Every response carries X-Request-ID and every request is logged.
-func NewHandler(store *Store, log *slog.Logger) http.Handler {
+// Every response carries X-Request-ID and every request is logged and
+// counted under its route pattern.
+func NewHandler(store *Store, m *metrics.Metrics, log *slog.Logger) http.Handler {
 	s := &server{store: store, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /blobs/{id}", s.handlePut)
@@ -47,7 +51,8 @@ func NewHandler(store *Store, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	return httpx.RequestID(httpx.Logging(log, mux))
+	mux.Handle("GET /metrics", m.Handler())
+	return httpx.RequestID(httpx.Logging(log, httpx.Metrics(m, mux)))
 }
 
 func (s *server) handlePut(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +90,7 @@ func (s *server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := io.Copy(w, b); err != nil {
-		s.log.Warn("http.stream_aborted", "request_id", httpx.RequestIDFrom(r.Context()), "err", err)
+		s.log.Warn(events.HTTPStreamAborted, "request_id", httpx.RequestIDFrom(r.Context()), "err", err)
 	}
 }
 
@@ -103,7 +108,7 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error, invalidID int) {
 	status, code := statusFor(err, invalidID)
 	if status == http.StatusInternalServerError {
-		s.log.Error("http.store_error", "request_id", httpx.RequestIDFrom(r.Context()), "err", err)
+		s.log.Error(events.HTTPStoreError, "request_id", httpx.RequestIDFrom(r.Context()), "err", err)
 	}
 	httpx.WriteError(w, r, status, code, err.Error())
 }

@@ -1,8 +1,9 @@
 # Progress
 
 ## State
-Done: C1–C19. C19: repair step 3 trims over-replication — meta.OverReplicated + TrimReplica (conditional: drops the row only while >RF UP holders remain, enqueues the delete in the same tx), worker picks the lowest placement-ranked UP holder, event trim_enqueued.
-Next: C20 — (next roadmap item)
+Done: C1–C20. C20: Prometheus metrics — internal/metrics.New() on a private registry, httpx.Metrics middleware keyed by r.Pattern, cluster/repair/reader/api/node wired, /metrics on both binaries; all event names in internal/events.
+Next: C21 — (next roadmap item)
+
 ## Hours ledger
 | Item | Est | Actual | Notes |
 |---|---|---|---|
@@ -25,3 +26,4 @@ Next: C20 — (next roadmap item)
 | C17 | | | Go chain (quarantine→ErrIntegrity→drop→repair) was already wired; the only hole was repair reading a corrupt source. Corruption is read-triggered, so "two corrupt → repaired" must keep GETting until both are visited (reads shuffle). Git Bash rewrites /data paths in docker args — keep them inside sh -c. Compose nodes heartbeat every 5s (default) vs 3s coordinator timeout, so nodes flap DOWN/UP every 5s in `make up`; smoke passes anyway. |
 | C18 | | | meta+api+coordinator+integration -race clean; sweep runs only at startup, so an intent younger than 2× timeout at restart waits for the next restart; sweep fans out to every `nodes` row since nobody recorded which nodes the blob reached, GC treats "already gone" as done; StartedAt is caller-supplied so tests can seed a stale intent without a clock hook; `git stash` on this box rewrites touched files to CRLF (autocrlf=true) and trips gofmt — `gofmt -w` on them fixes it |
 | C19 | | | meta+repair+integration -race clean; the trimmed copy is always the spare in practice (PUT and repair both rank by key, so the restarted original holder outranks the repair target); TrimReplica re-checks the UP count inside the tx so a node going DOWN between fetch and commit cannot push a blob below RF; a DOWN holder is never the victim, only UP copies are trimmed |
+| C20 | | | all pkgs -race clean; one Metrics struct serves both binaries (coordinator gauges sit at 0 on a node); nodes_up/total refresh on transitions, DB gauges only at the end of a repair tick so objects_total lags a PUT by one tick; the monitor can mark a node DOWN between a tick's repair step and its gauge refresh, so a grace skip may land one tick after the gauge moves; -race works locally now (gcc via WinLibs) |

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"net/http"
@@ -37,7 +38,7 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := httptest.NewServer(storage.NewHandler(store, log))
+	node := httptest.NewServer(storage.NewHandler(store, metrics.New(), log))
 	t.Cleanup(node.Close)
 
 	dataDir := filepath.Join(t.TempDir(), "coord")
@@ -55,7 +56,7 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 		RepairInterval: time.Minute, RepairGrace: time.Minute,
 	}
 	db := openMeta(t, dataDir)
-	c, err := New(cfg, Deps{Meta: db, Log: log})
+	c, err := New(cfg, Deps{Meta: db, Metrics: metrics.New(), Log: log})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestStopWaitsForWorkers(t *testing.T) {
 		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute, RF: 1, W: 1,
 		RepairInterval: time.Minute, RepairGrace: time.Minute,
 	}
-	c, err := New(cfg, Deps{Meta: openMeta(t, dataDir), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	c, err := New(cfg, Deps{Meta: openMeta(t, dataDir), Metrics: metrics.New(), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

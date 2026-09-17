@@ -12,6 +12,7 @@ package repair
 import (
 	"context"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/events"
 	"log/slog"
 	"math/rand/v2"
 	"slices"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
 	"github.com/manavmann/distributed-object-storage/internal/placement"
 )
@@ -34,7 +36,9 @@ const warnAttempts = 5
 // queued. Grace is the DOWN time a node is allowed before its blobs are
 // re-replicated. RF is how many UP holders every blob should have.
 // BatchSize bounds the rows one tick fetches for each step, and Timeout
-// bounds each request to a node.
+// bounds each request to a node. Metrics receives repairs_total and
+// integrity_failures_total as they happen and the queue gauges once per
+// tick.
 type Worker struct {
 	DB        *meta.DB
 	Client    *nodeclient.Client
@@ -44,6 +48,7 @@ type Worker struct {
 	RF        int
 	BatchSize int
 	Timeout   time.Duration
+	Metrics   *metrics.Metrics
 	Log       *slog.Logger
 
 	skippedNoSource atomic.Int64
@@ -72,12 +77,35 @@ func (w *Worker) SkippedNoSource() int64 {
 
 // tick is one pass of the worker: step 1 garbage-collects pending_deletes,
 // step 2 re-replicates under-replicated blobs, step 3 trims
-// over-replicated ones. Stale pending_uploads are swept into
-// pending_deletes by the coordinator at startup, not here.
+// over-replicated ones, and the queue gauges are refreshed from what is
+// left. Stale pending_uploads are swept into pending_deletes by the
+// coordinator at startup, not here.
 func (w *Worker) tick(ctx context.Context) {
 	w.gc(ctx)
 	w.rereplicate(ctx)
 	w.trim(ctx)
+	w.refreshGauges(ctx)
+}
+
+// refreshGauges sets under_replicated_blobs, pending_deletes and
+// objects_total from metadata. A count that fails is logged and its gauge
+// keeps the previous value.
+func (w *Worker) refreshGauges(ctx context.Context) {
+	if n, err := w.DB.CountUnderReplicated(ctx, w.RF); err != nil {
+		w.Log.Error(events.GaugeRefreshFailed, "gauge", "under_replicated_blobs", "err", err)
+	} else {
+		w.Metrics.UnderReplicatedBlobs.Set(float64(n))
+	}
+	if n, err := w.DB.CountPending(ctx); err != nil {
+		w.Log.Error(events.GaugeRefreshFailed, "gauge", "pending_deletes", "err", err)
+	} else {
+		w.Metrics.PendingDeletes.Set(float64(n))
+	}
+	if n, err := w.DB.CountObjects(ctx); err != nil {
+		w.Log.Error(events.GaugeRefreshFailed, "gauge", "objects_total", "err", err)
+	} else {
+		w.Metrics.ObjectsTotal.Set(float64(n))
+	}
 }
 
 // healthy is the registry's UP nodes as the ids placement ranks and the
@@ -101,7 +129,7 @@ func (w *Worker) gc(ctx context.Context) {
 	ids, addrs := w.healthy()
 	rows, err := w.DB.PendingDeletesForNodes(ctx, ids, w.BatchSize)
 	if err != nil {
-		w.Log.Error("gc_fetch_failed", "err", err)
+		w.Log.Error(events.GCFetchFailed, "err", err)
 		return
 	}
 	now := time.Now()
@@ -124,21 +152,21 @@ func (w *Worker) deleteCopy(ctx context.Context, p meta.PendingDelete, addr stri
 	if err != nil && !errors.Is(err, nodeclient.ErrNotFound) {
 		attempts, berr := w.DB.BumpAttempts(ctx, p.BlobID, p.NodeID)
 		if berr != nil {
-			w.Log.Error("gc_bump_failed", "blob_id", p.BlobID, "node_id", p.NodeID, "err", berr)
+			w.Log.Error(events.GCBumpFailed, "blob_id", p.BlobID, "node_id", p.NodeID, "err", berr)
 			return
 		}
 		level := slog.LevelInfo
 		if attempts >= warnAttempts {
 			level = slog.LevelWarn
 		}
-		w.Log.Log(ctx, level, "gc_delete_failed", "blob_id", p.BlobID, "node_id", p.NodeID, "attempts", attempts, "err", err)
+		w.Log.Log(ctx, level, events.GCDeleteFailed, "blob_id", p.BlobID, "node_id", p.NodeID, "attempts", attempts, "err", err)
 		return
 	}
 	if rerr := w.DB.RemovePending(ctx, p.BlobID, p.NodeID); rerr != nil {
-		w.Log.Error("gc_remove_failed", "blob_id", p.BlobID, "node_id", p.NodeID, "err", rerr)
+		w.Log.Error(events.GCRemoveFailed, "blob_id", p.BlobID, "node_id", p.NodeID, "err", rerr)
 		return
 	}
-	w.Log.Info("gc_deleted", "blob_id", p.BlobID, "node_id", p.NodeID, "already_gone", err != nil)
+	w.Log.Info(events.GCDeleted, "blob_id", p.BlobID, "node_id", p.NodeID, "already_gone", err != nil)
 }
 
 // rereplicate fetches one batch of blobs with fewer than RF UP holders and
@@ -149,7 +177,7 @@ func (w *Worker) deleteCopy(ctx context.Context, p meta.PendingDelete, addr stri
 func (w *Worker) rereplicate(ctx context.Context) {
 	cands, err := w.DB.UnderReplicated(ctx, w.RF, w.BatchSize)
 	if err != nil {
-		w.Log.Error("repair_fetch_failed", "err", err)
+		w.Log.Error(events.RepairFetchFailed, "err", err)
 		return
 	}
 	if len(cands) == 0 {
@@ -162,7 +190,8 @@ func (w *Worker) rereplicate(ctx context.Context) {
 			return
 		}
 		if c.LastDownChange != 0 && now.Sub(time.UnixMilli(c.LastDownChange)) < w.Grace {
-			w.Log.Info("repair_skipped", "blob_id", c.BlobID, "reason", "grace")
+			w.Metrics.Repairs.WithLabelValues(metrics.ResultSkipped).Inc()
+			w.Log.Info(events.RepairSkipped, "blob_id", c.BlobID, "reason", "grace")
 			continue
 		}
 		var sources []meta.Replica
@@ -175,13 +204,15 @@ func (w *Worker) rereplicate(ctx context.Context) {
 		}
 		if len(sources) == 0 {
 			w.skippedNoSource.Add(1)
-			w.Log.Warn("repair_skipped", "blob_id", c.BlobID, "reason", "no_source")
+			w.Metrics.Repairs.WithLabelValues(metrics.ResultSkipped).Inc()
+			w.Log.Warn(events.RepairSkipped, "blob_id", c.BlobID, "reason", "no_source")
 			continue
 		}
 		ranked := placement.Rank(c.Key, ids)
 		i := slices.IndexFunc(ranked, func(id string) bool { return !holding[id] })
 		if i < 0 {
-			w.Log.Info("repair_skipped", "blob_id", c.BlobID, "reason", "no_target")
+			w.Metrics.Repairs.WithLabelValues(metrics.ResultSkipped).Inc()
+			w.Log.Info(events.RepairSkipped, "blob_id", c.BlobID, "reason", "no_target")
 			continue
 		}
 		target := ranked[i]
@@ -198,40 +229,48 @@ func (w *Worker) rereplicate(ctx context.Context) {
 // next tick to pick another source.
 func (w *Worker) copy(ctx context.Context, c meta.UnderReplicated, source meta.Replica, target, targetAddr string) {
 	start := time.Now()
-	w.Log.Info("repair_started", "blob_id", c.BlobID, "source", source.NodeID, "target", target)
+	w.Log.Info(events.RepairStarted, "blob_id", c.BlobID, "source", source.NodeID, "target", target)
 	reqCtx, cancel := context.WithTimeout(ctx, w.Timeout)
 	defer cancel()
 	blob, err := w.Client.Get(reqCtx, source.Addr, c.BlobID)
 	if errors.Is(err, nodeclient.ErrIntegrity) {
-		w.Log.Warn("integrity_failure", "blob_id", c.BlobID, "node_id", source.NodeID, "err", err)
+		w.Metrics.IntegrityFailures.Inc()
+		w.Metrics.Repairs.WithLabelValues(metrics.ResultFailed).Inc()
+		w.Log.Warn(events.IntegrityFailure, "blob_id", c.BlobID, "node_id", source.NodeID, "err", err)
 		if derr := w.DB.DropReplica(ctx, c.BlobID, source.NodeID); derr != nil {
-			w.Log.Error("repair_failed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", derr)
+			w.Log.Error(events.RepairFailed, "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", derr)
 		}
 		return
 	}
 	if err != nil {
-		w.Log.Error("repair_failed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", err)
+		w.Metrics.Repairs.WithLabelValues(metrics.ResultFailed).Inc()
+		w.Log.Error(events.RepairFailed, "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", err)
 		return
 	}
 	defer blob.Close()
 	if err := w.Client.Put(reqCtx, targetAddr, c.BlobID, blob, blob.Length, blob.SHA256); err != nil {
-		w.Log.Error("repair_failed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", err)
+		w.Metrics.Repairs.WithLabelValues(metrics.ResultFailed).Inc()
+		w.Log.Error(events.RepairFailed, "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", err)
 		return
 	}
 	added, err := w.DB.AddReplicaIfLive(ctx, c.BlobID, target)
 	if err != nil {
-		w.Log.Error("repair_commit_failed", "blob_id", c.BlobID, "target", target, "err", err)
+		w.Metrics.Repairs.WithLabelValues(metrics.ResultFailed).Inc()
+		w.Log.Error(events.RepairCommitFailed, "blob_id", c.BlobID, "target", target, "err", err)
 		return
 	}
 	if !added {
 		if err := w.DB.EnqueueDeletes(ctx, c.BlobID, []string{target}); err != nil {
-			w.Log.Error("repair_enqueue_failed", "blob_id", c.BlobID, "target", target, "err", err)
+			w.Metrics.Repairs.WithLabelValues(metrics.ResultFailed).Inc()
+			w.Log.Error(events.RepairEnqueueFailed, "blob_id", c.BlobID, "target", target, "err", err)
 			return
 		}
-		w.Log.Info("repair_skipped", "blob_id", c.BlobID, "target", target, "reason", "stale")
+		w.Metrics.Repairs.WithLabelValues(metrics.ResultSkipped).Inc()
+		w.Log.Info(events.RepairSkipped, "blob_id", c.BlobID, "target", target, "reason", "stale")
 		return
 	}
-	w.Log.Info("repair_completed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "duration", time.Since(start))
+	w.Metrics.Repairs.WithLabelValues(metrics.ResultCompleted).Inc()
+	w.Log.Info(events.RepairCompleted, "blob_id", c.BlobID, "source", source.NodeID, "target", target, "duration", time.Since(start))
 }
 
 // trim fetches one batch of blobs with more than RF UP holders and, for
@@ -243,7 +282,7 @@ func (w *Worker) copy(ctx context.Context, c meta.UnderReplicated, source meta.R
 func (w *Worker) trim(ctx context.Context) {
 	cands, err := w.DB.OverReplicated(ctx, w.RF, w.BatchSize)
 	if err != nil {
-		w.Log.Error("trim_fetch_failed", "err", err)
+		w.Log.Error(events.TrimFetchFailed, "err", err)
 		return
 	}
 	for _, c := range cands {
@@ -260,13 +299,13 @@ func (w *Worker) trim(ctx context.Context) {
 		victim := ranked[len(ranked)-1]
 		trimmed, err := w.DB.TrimReplica(ctx, c.BlobID, victim, w.RF)
 		if err != nil {
-			w.Log.Error("trim_failed", "blob_id", c.BlobID, "node_id", victim, "err", err)
+			w.Log.Error(events.TrimFailed, "blob_id", c.BlobID, "node_id", victim, "err", err)
 			continue
 		}
 		if !trimmed {
-			w.Log.Info("trim_skipped", "blob_id", c.BlobID, "node_id", victim, "reason", "not_over_replicated")
+			w.Log.Info(events.TrimSkipped, "blob_id", c.BlobID, "node_id", victim, "reason", "not_over_replicated")
 			continue
 		}
-		w.Log.Info("trim_enqueued", "blob_id", c.BlobID, "node_id", victim, "up_holders", len(up)-1)
+		w.Log.Info(events.TrimEnqueued, "blob_id", c.BlobID, "node_id", victim, "up_holders", len(up)-1)
 	}
 }

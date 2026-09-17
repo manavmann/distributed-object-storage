@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"errors"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -86,7 +87,7 @@ func openObject(t *testing.T, db *meta.DB, fake *fakeGetter) (*nodeclient.Blob, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &Reader{Meta: db, Client: fake, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	r := &Reader{Meta: db, Client: fake, Metrics: metrics.New(), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	return r.Open(context.Background(), obj)
 }
 

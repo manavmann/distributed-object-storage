@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/manavmann/distributed-object-storage/internal/metrics"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,7 +22,7 @@ import (
 func newServer(t *testing.T) (*httptest.Server, *Store, string) {
 	t.Helper()
 	s, root := openStore(t)
-	srv := httptest.NewServer(NewHandler(s, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv := httptest.NewServer(NewHandler(s, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(srv.Close)
 	return srv, s, root
 }
