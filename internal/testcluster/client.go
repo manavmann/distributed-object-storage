@@ -32,14 +32,15 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("api: %d %s: %s", e.Status, e.Code, e.Message)
 }
 
-// PutResult is the body of a successful object PUT plus its ETag.
+// PutResult is the body of a successful object PUT plus its ETag. Quorum
+// is "k/N": k of the N intended copies were acknowledged.
 type PutResult struct {
 	Bucket   string   `json:"bucket"`
 	Key      string   `json:"key"`
 	Size     int64    `json:"size"`
 	SHA256   string   `json:"sha256"`
 	Replicas []string `json:"replicas"`
-	Quorum   int      `json:"quorum"`
+	Quorum   string   `json:"quorum"`
 	ETag     string   `json:"-"`
 }
 

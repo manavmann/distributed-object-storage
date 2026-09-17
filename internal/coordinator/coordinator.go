@@ -61,6 +61,8 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 			MaxObjectSize: cfg.MaxObjectSize,
 			MaxUploads:    cfg.MaxUploads,
 			NodeTimeout:   cfg.NodeTimeout,
+			RF:            cfg.RF,
+			W:             cfg.W,
 			Log:           deps.Log,
 		}),
 	}, nil

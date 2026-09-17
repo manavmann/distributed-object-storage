@@ -9,12 +9,14 @@ import (
 
 func TestLoadCoordinatorTable(t *testing.T) {
 	full := map[string]string{
-		"CAIRN_ADDR":              "127.0.0.1:0",
-		"CAIRN_DATA_DIR":          "/var/cairn",
-		"CAIRN_MAX_OBJECT_SIZE":   "1024",
-		"CAIRN_MAX_UPLOADS":       "2",
-		"CAIRN_NODE_TIMEOUT":      "5s",
-		"CAIRN_HEARTBEAT_TIMEOUT": "6s",
+		"CAIRN_ADDR":               "127.0.0.1:0",
+		"CAIRN_DATA_DIR":           "/var/cairn",
+		"CAIRN_MAX_OBJECT_SIZE":    "1024",
+		"CAIRN_MAX_UPLOADS":        "2",
+		"CAIRN_NODE_TIMEOUT":       "5s",
+		"CAIRN_HEARTBEAT_TIMEOUT":  "6s",
+		"CAIRN_REPLICATION_FACTOR": "5",
+		"CAIRN_WRITE_QUORUM":       "4",
 	}
 	with := func(k, v string) map[string]string {
 		m := map[string]string{}
@@ -33,10 +35,12 @@ func TestLoadCoordinatorTable(t *testing.T) {
 		{name: "defaults", env: nil, want: CoordinatorConfig{
 			Addr: ":9000", DataDir: "./data",
 			MaxObjectSize: 64 << 20, MaxUploads: 16, NodeTimeout: 30 * time.Second, HeartbeatTimeout: 15 * time.Second,
+			RF: 3, W: 2,
 		}},
 		{name: "all set", env: full, want: CoordinatorConfig{
 			Addr: "127.0.0.1:0", DataDir: "/var/cairn",
 			MaxObjectSize: 1024, MaxUploads: 2, NodeTimeout: 5 * time.Second, HeartbeatTimeout: 6 * time.Second,
+			RF: 5, W: 4,
 		}},
 		{name: "bad size", env: with("CAIRN_MAX_OBJECT_SIZE", "big"), bad: true},
 		{name: "zero size", env: with("CAIRN_MAX_OBJECT_SIZE", "0"), bad: true},
@@ -46,6 +50,11 @@ func TestLoadCoordinatorTable(t *testing.T) {
 		{name: "negative timeout", env: with("CAIRN_NODE_TIMEOUT", "-1s"), bad: true},
 		{name: "bad heartbeat timeout", env: with("CAIRN_HEARTBEAT_TIMEOUT", "soon"), bad: true},
 		{name: "zero heartbeat timeout", env: with("CAIRN_HEARTBEAT_TIMEOUT", "0s"), bad: true},
+		{name: "bad rf", env: with("CAIRN_REPLICATION_FACTOR", "three"), bad: true},
+		{name: "zero rf", env: with("CAIRN_REPLICATION_FACTOR", "0"), bad: true},
+		{name: "bad quorum", env: with("CAIRN_WRITE_QUORUM", "two"), bad: true},
+		{name: "zero quorum", env: with("CAIRN_WRITE_QUORUM", "0"), bad: true},
+		{name: "quorum above rf", env: with("CAIRN_WRITE_QUORUM", "6"), bad: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,14 +76,16 @@ func TestLoadCoordinatorTable(t *testing.T) {
 }
 
 func TestCoordinatorValidate(t *testing.T) {
-	good := CoordinatorConfig{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second}
+	good := CoordinatorConfig{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 1, W: 1}
 	if err := good.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	for _, bad := range []CoordinatorConfig{
-		{Addr: "", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second},
-		{Addr: ":1", DataDir: "", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second},
-		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: 0},
+		{Addr: "", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 1, W: 1},
+		{Addr: ":1", DataDir: "", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 1, W: 1},
+		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: 0, RF: 1, W: 1},
+		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 0, W: 0},
+		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 2, W: 3},
 	} {
 		if err := bad.Validate(); !errors.Is(err, ErrInvalidConfig) {
 			t.Errorf("Validate(%+v) = %v, want ErrInvalidConfig", bad, err)

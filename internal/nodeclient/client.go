@@ -63,15 +63,24 @@ type Blob struct {
 
 // Put streams size bytes of r to the node at addr as blob id. sha256 is
 // the hex digest of those bytes; the node rejects the write with
-// ErrChecksum if what it received hashes differently.
+// ErrChecksum if what it received hashes differently. A connection that
+// cannot be established is retried once, immediately: no byte of r has
+// been consumed at that point, so the second attempt sends the same body.
+// Nothing else is retried.
 func (c *Client) Put(ctx context.Context, addr, id string, r io.Reader, size int64, sha256 string) error {
-	req, err := c.request(ctx, http.MethodPut, addr, id, r)
-	if err != nil {
-		return err
+	send := func() (*http.Response, error) {
+		req, err := c.request(ctx, http.MethodPut, addr, id, r)
+		if err != nil {
+			return nil, err
+		}
+		req.ContentLength = size
+		req.Header.Set(storage.ContentSHA256Header, sha256)
+		return c.do(req)
 	}
-	req.ContentLength = size
-	req.Header.Set(storage.ContentSHA256Header, sha256)
-	resp, err := c.do(req)
+	resp, err := send()
+	if err != nil && isDialError(err) {
+		resp, err = send()
+	}
 	if err != nil {
 		return err
 	}
@@ -170,6 +179,14 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return resp, nil
+}
+
+// isDialError reports whether err is a failure to connect at all (refused,
+// unreachable, dial timeout), as opposed to a failure after the request
+// started going out.
+func isDialError(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
 
 // errorFrom is the single place a non-success node response becomes a

@@ -35,6 +35,11 @@ type Opts struct {
 	HeartbeatTimeout time.Duration
 	// NodeRequestTimeout bounds one coordinator request to a node. Default 5s.
 	NodeRequestTimeout time.Duration
+	// RF and W are the PUT replication factor and write quorum. Defaults
+	// 3 and 2, the production defaults; a cluster with fewer than W nodes
+	// refuses every PUT, so small clusters set both explicitly.
+	RF int
+	W  int
 }
 
 // Cluster is a running coordinator plus its nodes. Its methods must be
@@ -80,6 +85,12 @@ func New(t *testing.T, opts Opts) *Cluster {
 	if opts.NodeRequestTimeout == 0 {
 		opts.NodeRequestTimeout = 5 * time.Second
 	}
+	if opts.RF == 0 {
+		opts.RF = 3
+	}
+	if opts.W == 0 {
+		opts.W = 2
+	}
 	c := &Cluster{
 		t:    t,
 		log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -91,6 +102,8 @@ func New(t *testing.T, opts Opts) *Cluster {
 			MaxUploads:       16,
 			NodeTimeout:      opts.NodeRequestTimeout,
 			HeartbeatTimeout: opts.HeartbeatTimeout,
+			RF:               opts.RF,
+			W:                opts.W,
 		},
 	}
 	if err := c.cfg.Validate(); err != nil {

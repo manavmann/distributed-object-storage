@@ -27,7 +27,7 @@ import (
 // newCluster is one coordinator in front of one real storage node.
 func newCluster(t *testing.T) *testcluster.Cluster {
 	t.Helper()
-	return testcluster.New(t, testcluster.Opts{Nodes: 1})
+	return testcluster.New(t, testcluster.Opts{Nodes: 1, RF: 1, W: 1})
 }
 
 // do sends method to path with body and optional header pairs and returns
@@ -83,7 +83,7 @@ func TestRoundTrip3MiB(t *testing.T) {
 		t.Fatalf("PUT ETag = %s, want %q", pr.ETag, want)
 	}
 	if pr.Bucket != "photos" || pr.Key != "2026/cat.jpg" || pr.Size != int64(len(payload)) || pr.SHA256 != want ||
-		len(pr.Replicas) != 1 || pr.Replicas[0] != c.NodeID(0) || pr.Quorum != 1 {
+		len(pr.Replicas) != 1 || pr.Replicas[0] != c.NodeID(0) || pr.Quorum != "1/1" {
 		t.Fatalf("PUT body = %+v", pr)
 	}
 	if files := c.SpoolFiles(); len(files) != 0 {
@@ -364,7 +364,7 @@ func TestNoHealthyNodesOnPut(t *testing.T) {
 	}
 	handler := api.NewHandler(api.Config{
 		Meta: c.Meta(), Nodes: empty, SpoolDir: t.TempDir(),
-		MaxObjectSize: testcluster.MaxObjectSize, MaxUploads: 1, NodeTimeout: time.Second, Log: log,
+		MaxObjectSize: testcluster.MaxObjectSize, MaxUploads: 1, NodeTimeout: time.Second, RF: 1, W: 1, Log: log,
 	})
 	req := httptest.NewRequest(http.MethodPut, "/v1/bkt/k", bytes.NewReader([]byte("x")))
 	rec := httptest.NewRecorder()

@@ -1,7 +1,7 @@
 // Package api is the coordinator's public HTTP API. Handlers never buffer
 // a client body in memory: a PUT is spooled to disk while it is hashed,
-// then streamed from the spool to a storage node, and only a node's
-// acknowledgement of the checksummed write makes it into metadata.
+// then streamed from the spool to a quorum of storage nodes, and only the
+// nodes that acknowledged the checksummed write make it into metadata.
 package api
 
 import (
@@ -24,6 +24,7 @@ import (
 	"github.com/manavmann/distributed-object-storage/internal/httpx"
 	"github.com/manavmann/distributed-object-storage/internal/meta"
 	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
+	"github.com/manavmann/distributed-object-storage/internal/replication"
 )
 
 // Config is everything a Server needs.
@@ -38,7 +39,11 @@ type Config struct {
 	MaxUploads int
 	// NodeTimeout is the deadline for one request to a storage node.
 	NodeTimeout time.Duration
-	Log         *slog.Logger
+	// RF is how many copies a PUT tries to write; W how many must be
+	// acknowledged before it commits. 1 <= W <= RF.
+	RF  int
+	W   int
+	Log *slog.Logger
 }
 
 // Server holds the handler state.
@@ -46,6 +51,7 @@ type Server struct {
 	meta        *meta.DB
 	nodes       *cluster.Registry
 	client      *nodeclient.Client
+	writer      *replication.Writer
 	spoolDir    string
 	maxSize     int64
 	nodeTimeout time.Duration
@@ -53,14 +59,15 @@ type Server struct {
 	log         *slog.Logger
 }
 
-// putResponse is the body of a successful object PUT.
+// putResponse is the body of a successful object PUT. Quorum is "k/N":
+// k nodes acknowledged out of the N the PUT aimed for.
 type putResponse struct {
 	Bucket   string   `json:"bucket"`
 	Key      string   `json:"key"`
 	Size     int64    `json:"size"`
 	SHA256   string   `json:"sha256"`
 	Replicas []string `json:"replicas"`
-	Quorum   int      `json:"quorum"`
+	Quorum   string   `json:"quorum"`
 }
 
 // NewHandler serves the coordinator API:
@@ -78,10 +85,12 @@ type putResponse struct {
 //
 // Every response carries X-Request-ID and every request is logged.
 func NewHandler(cfg Config) http.Handler {
+	client := nodeclient.New()
 	s := &Server{
 		meta:        cfg.Meta,
 		nodes:       cfg.Nodes,
-		client:      nodeclient.New(),
+		client:      client,
+		writer:      &replication.Writer{N: cfg.RF, W: cfg.W, Client: client, Registry: cfg.Nodes, Timeout: cfg.NodeTimeout},
 		spoolDir:    cfg.SpoolDir,
 		maxSize:     cfg.MaxObjectSize,
 		nodeTimeout: cfg.NodeTimeout,
@@ -212,16 +221,16 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := hex.EncodeToString(digest.Sum(nil))
 
-	healthy := s.nodes.Healthy()
-	if len(healthy) == 0 {
-		s.writeError(w, r, fmt.Errorf("%w: no healthy nodes", ErrInsufficientReplicas))
-		return
+	res, err := s.writer.Write(r.Context(), key, blobID, size, sum, spool)
+	for _, a := range res.Failed {
+		s.log.Warn("replica_write_failed", "request_id", httpx.RequestIDFrom(r.Context()),
+			"blob_id", blobID, "node_id", a.NodeID, "err", a.Err)
 	}
-	node := healthy[0]
-	nodeCtx, cancel := context.WithTimeout(r.Context(), s.nodeTimeout)
-	defer cancel()
-	if err := s.client.Put(nodeCtx, node.Addr, blobID, io.NewSectionReader(spool, 0, size), size, sum); err != nil {
-		s.writeError(w, r, fmt.Errorf("%w: node %s: %w", ErrInsufficientReplicas, node.ID, err))
+	if err != nil {
+		// Copies that did land are unreferenced; queue them for the GC
+		// worker rather than deleting inline.
+		s.queueStrays(r, blobID, res.Succeeded)
+		s.writeError(w, r, fmt.Errorf("%w: %w", ErrInsufficientReplicas, err))
 		return
 	}
 
@@ -230,20 +239,31 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	obj := meta.Object{Bucket: bucket, Key: key, BlobID: blobID, Size: size, SHA256: sum, ContentType: contentType}
-	if err := s.meta.CommitObject(r.Context(), obj, []string{node.ID}); err != nil {
-		// The blob is on the node but not in metadata; ask the node to
-		// quarantine it so nothing unreferenced lingers in blobs/.
-		if derr := s.client.Delete(nodeCtx, node.Addr, blobID); derr != nil {
-			s.log.Warn("api.orphan_blob", "request_id", httpx.RequestIDFrom(r.Context()),
-				"blob_id", blobID, "node_id", node.ID, "err", derr)
-		}
+	if err := s.meta.CommitObject(r.Context(), obj, res.Succeeded); err != nil {
+		s.queueStrays(r, blobID, res.Succeeded)
 		s.writeError(w, r, err)
 		return
 	}
 	w.Header().Set("ETag", `"`+sum+`"`)
 	httpx.WriteJSON(w, http.StatusOK, putResponse{
-		Bucket: bucket, Key: key, Size: size, SHA256: sum, Replicas: []string{node.ID}, Quorum: 1,
+		Bucket: bucket, Key: key, Size: size, SHA256: sum, Replicas: res.Succeeded,
+		Quorum: strconv.Itoa(len(res.Succeeded)) + "/" + strconv.Itoa(s.writer.N),
 	})
+}
+
+// queueStrays puts blobID on nodeIDs into pending_deletes: the copies were
+// written but the object was never committed. A failure to queue is
+// logged, not returned, because the response has already been decided.
+func (s *Server) queueStrays(r *http.Request, blobID string, nodeIDs []string) {
+	if len(nodeIDs) == 0 {
+		return
+	}
+	// The client may already be gone, so the queueing must not die with
+	// its request.
+	if err := s.meta.EnqueueDeletes(context.WithoutCancel(r.Context()), blobID, nodeIDs); err != nil {
+		s.log.Error("api.orphan_blob", "request_id", httpx.RequestIDFrom(r.Context()),
+			"blob_id", blobID, "node_ids", nodeIDs, "err", err)
+	}
 }
 
 // bucketResponse is the body of GET /v1/{bucket}.

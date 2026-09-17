@@ -1,8 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C10. C10: internal/placement HRW ranking — Rank/Targets over splitmix64(fnv64a(nodeID+"\x00"+key)), tie-break by id, 2 allocs/call, no callers yet.
-Next: C11 — (next roadmap item)
+Done: C1–C11. C11: internal/testcluster in-process harness (K nodes + coordinator on httptest, Kill/Restart/RestartCoordinator, fault middleware, typed client); storage.NewNode + coordinator.New(cfg, Deps)/Start/Stop; api tests now run on the harness as package api_test.
+Next: C12 — (next roadmap item)
 
 ## Hours ledger
 | Item | Est | Actual | Notes |
@@ -17,3 +17,4 @@ Next: C11 — (next roadmap item)
 | C8 | 3h | | nonroot writes named volume fine via COPY --chown /data (no root fallback); node1 logs heartbeat 404s until coordinator serves /internal/heartbeat |
 | C9 | 3h | | compose: node1 DOWN ~12s after stop, UP <1s after start; node_up/node_down logged; under_replicated hardwired 0; status strings are UP/DOWN, old "up" rows self-heal on first heartbeat |
 | C10 | 3h | | raw FNV-1a fails ±20% on sequential keys (800/3600 with hostname ids); splitmix64 finalizer added ; Rank4 227ns, Rank16 1.07µs |
+| C11 | 3h | | integration -race -count=5 in 6.7s; Locate reads metadata (no endpoint yet); RF/W/RepairInterval/RepairGrace left out of Opts until consumed; api pkg can't import testcluster (cycle) so env tests became api_test |

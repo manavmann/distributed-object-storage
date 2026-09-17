@@ -15,6 +15,8 @@ import (
 //	CAIRN_MAX_UPLOADS        16        PUTs spooling or replicating at once
 //	CAIRN_NODE_TIMEOUT       30s       deadline for one request to a node
 //	CAIRN_HEARTBEAT_TIMEOUT  15s       silence after which a node is marked DOWN
+//	CAIRN_REPLICATION_FACTOR 3         copies a PUT tries to write (N)
+//	CAIRN_WRITE_QUORUM       2         copies a PUT needs before it commits (W)
 type CoordinatorConfig struct {
 	Addr             string
 	DataDir          string
@@ -22,6 +24,8 @@ type CoordinatorConfig struct {
 	MaxUploads       int
 	NodeTimeout      time.Duration
 	HeartbeatTimeout time.Duration
+	RF               int
+	W                int
 }
 
 // LoadCoordinator builds a CoordinatorConfig from getenv (normally
@@ -58,6 +62,16 @@ func LoadCoordinator(getenv func(string) string) (CoordinatorConfig, error) {
 	if err != nil {
 		return CoordinatorConfig{}, fmt.Errorf("%w: CAIRN_HEARTBEAT_TIMEOUT %q: %w", ErrInvalidConfig, hbTimeout, err)
 	}
+	rf := get("CAIRN_REPLICATION_FACTOR", "3")
+	c.RF, err = strconv.Atoi(rf)
+	if err != nil {
+		return CoordinatorConfig{}, fmt.Errorf("%w: CAIRN_REPLICATION_FACTOR %q: %w", ErrInvalidConfig, rf, err)
+	}
+	w := get("CAIRN_WRITE_QUORUM", "2")
+	c.W, err = strconv.Atoi(w)
+	if err != nil {
+		return CoordinatorConfig{}, fmt.Errorf("%w: CAIRN_WRITE_QUORUM %q: %w", ErrInvalidConfig, w, err)
+	}
 	if err := c.Validate(); err != nil {
 		return CoordinatorConfig{}, err
 	}
@@ -83,6 +97,12 @@ func (c CoordinatorConfig) Validate() error {
 	}
 	if c.HeartbeatTimeout <= 0 {
 		return fmt.Errorf("%w: CAIRN_HEARTBEAT_TIMEOUT must be positive, got %s", ErrInvalidConfig, c.HeartbeatTimeout)
+	}
+	if c.RF <= 0 {
+		return fmt.Errorf("%w: CAIRN_REPLICATION_FACTOR must be positive, got %d", ErrInvalidConfig, c.RF)
+	}
+	if c.W <= 0 || c.W > c.RF {
+		return fmt.Errorf("%w: CAIRN_WRITE_QUORUM must be in [1, %d], got %d", ErrInvalidConfig, c.RF, c.W)
 	}
 	return nil
 }

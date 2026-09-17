@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,5 +211,53 @@ func TestPutTruncatedBodyIsNotStored(t *testing.T) {
 	}
 	if _, err := c.Get(context.Background(), addr, "b1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("truncated blob served: %v", err)
+	}
+}
+
+// flakyDialer fails the first dial with a dial error and delegates every
+// later one to the real dialer.
+type flakyDialer struct {
+	real  func(ctx context.Context, network, addr string) (net.Conn, error)
+	dials atomic.Int32
+}
+
+func (d *flakyDialer) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if d.dials.Add(1) == 1 {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: errors.New("injected")}
+	}
+	return d.real(ctx, network, addr)
+}
+
+func TestPutRetriesFailedDialOnce(t *testing.T) {
+	c, addr := New(), newNode(t)
+	tr := c.http.Transport.(*http.Transport)
+	d := &flakyDialer{real: tr.DialContext}
+	tr.DialContext = d.dial
+	payload := []byte("retry me")
+	if err := c.Put(context.Background(), addr, "b1", bytes.NewReader(payload), int64(len(payload)), digest(payload)); err != nil {
+		t.Fatalf("Put after one failed dial = %v", err)
+	}
+	if n := d.dials.Load(); n != 2 {
+		t.Fatalf("%d dials, want 2", n)
+	}
+	length, sum, err := c.Head(context.Background(), addr, "b1")
+	if err != nil || length != int64(len(payload)) || sum != digest(payload) {
+		t.Fatalf("Head after retried Put = (%d, %s, %v)", length, sum, err)
+	}
+}
+
+func TestPutDoesNotRetryNodeErrors(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		httpx.WriteError(w, r, http.StatusInternalServerError, "internal", "stub")
+	}))
+	t.Cleanup(srv.Close)
+	err := New().Put(context.Background(), srv.URL, "x", bytes.NewReader([]byte("a")), 1, digest([]byte("a")))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Put = %v, want ErrUnavailable", err)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Fatalf("node saw %d requests, want 1", n)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,24 +54,17 @@ func TestStartPutGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pr.Size != int64(len(payload)) || len(pr.Replicas) != 1 || pr.ETag != `"`+pr.SHA256+`"` {
+	if pr.Size != int64(len(payload)) || len(pr.Replicas) != 3 || pr.Quorum != "3/3" || pr.ETag != `"`+pr.SHA256+`"` {
 		t.Fatalf("put = %+v", pr)
 	}
 	blobID, holders := c.Locate("bkt", "dir/obj")
-	if len(holders) != 1 || holders[0] != pr.Replicas[0] {
+	if !sameSet(holders, pr.Replicas) {
 		t.Fatalf("Locate = %s on %v, put said %v", blobID, holders, pr.Replicas)
 	}
-	held := 0
 	for i := 0; i < 3; i++ {
-		if c.HasBlob(i, blobID) {
-			held++
-			if c.NodeID(i) != holders[0] {
-				t.Fatalf("blob on %s, metadata says %s", c.NodeID(i), holders[0])
-			}
+		if !c.HasBlob(i, blobID) {
+			t.Fatalf("%s does not hold the blob", c.NodeID(i))
 		}
-	}
-	if held != 1 {
-		t.Fatalf("%d nodes hold the blob, want 1", held)
 	}
 	obj, err := cl.Get("bkt", "dir/obj")
 	if err != nil {
@@ -201,7 +195,7 @@ func TestCoordinatorRestartKeepsObjects(t *testing.T) {
 		}
 		return true
 	}, "nodes UP after coordinator restart")
-	if id, h := c.Locate("bkt", "k"); id != blobID || len(h) != 1 || h[0] != holders[0] {
+	if id, h := c.Locate("bkt", "k"); id != blobID || !sameSet(h, holders) {
 		t.Fatalf("Locate after restart = %s on %v, want %s on %v", id, h, blobID, holders)
 	}
 	obj, err := cl.Get("bkt", "k")
@@ -221,7 +215,7 @@ func TestCoordinatorRestartKeepsObjects(t *testing.T) {
 
 func TestFaultFlags(t *testing.T) {
 	t.Parallel()
-	c := testcluster.New(t, testcluster.Opts{Nodes: 1, NodeRequestTimeout: 100 * time.Millisecond})
+	c := testcluster.New(t, testcluster.Opts{Nodes: 1, NodeRequestTimeout: 100 * time.Millisecond, RF: 1, W: 1})
 	cl := c.Client()
 	if err := cl.CreateBucket("bkt"); err != nil {
 		t.Fatal(err)
@@ -285,4 +279,12 @@ func TestFaultFlags(t *testing.T) {
 	if c.HasBlob(0, id2) {
 		t.Fatal("corrupt blob still under blobs/")
 	}
+}
+
+// sameSet reports whether a and b hold the same node ids in any order.
+func sameSet(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }

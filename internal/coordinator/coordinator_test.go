@@ -51,7 +51,7 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 
 	cfg := config.CoordinatorConfig{
 		Addr: ":0", DataDir: dataDir,
-		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
+		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute, RF: 1, W: 1,
 	}
 	db := openMeta(t, dataDir)
 	c, err := New(cfg, Deps{Meta: db, Log: log})
@@ -123,7 +123,7 @@ func TestStopWaitsForMonitor(t *testing.T) {
 	dataDir := t.TempDir()
 	cfg := config.CoordinatorConfig{
 		Addr: ":0", DataDir: dataDir,
-		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
+		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute, RF: 1, W: 1,
 	}
 	c, err := New(cfg, Deps{Meta: openMeta(t, dataDir), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {

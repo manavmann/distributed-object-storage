@@ -36,7 +36,7 @@ func TestServeRoundTrip(t *testing.T) {
 	}
 	cfg := config.CoordinatorConfig{
 		Addr: ln.Addr().String(), DataDir: t.TempDir(),
-		MaxObjectSize: 1 << 20, MaxUploads: 2, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute,
+		MaxObjectSize: 1 << 20, MaxUploads: 2, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute, RF: 1, W: 1,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
