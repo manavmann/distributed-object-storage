@@ -1,35 +1,94 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"io"
-	"os"
-	"strings"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/manavmann/distributed-object-storage/internal/cluster"
+	"github.com/manavmann/distributed-object-storage/internal/config"
+	"github.com/manavmann/distributed-object-storage/internal/storage"
 )
 
-func TestVersion(t *testing.T) {
+// TestServeRoundTrip runs the coordinator against one in-process node,
+// stores and reads an object, and checks a clean shutdown.
+func TestServeRoundTrip(t *testing.T) {
 	if version == "" {
 		t.Fatal("version is empty")
 	}
-
-	r, w, err := os.Pipe()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := storage.Open(t.TempDir())
 	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+		t.Fatal(err)
 	}
-	stdout := os.Stdout
-	os.Stdout = w
-	main()
-	os.Stdout = stdout
-	if err := w.Close(); err != nil {
-		t.Fatalf("close pipe: %v", err)
+	node := httptest.NewServer(storage.NewHandler(store, log))
+	t.Cleanup(node.Close)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.CoordinatorConfig{
+		Addr: ln.Addr().String(), DataDir: t.TempDir(), Nodes: []cluster.Node{{ID: "n1", Addr: node.URL}},
+		MaxObjectSize: 1 << 20, MaxUploads: 2, NodeTimeout: time.Second,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, cfg, ln, log) }()
+
+	base := "http://" + ln.Addr().String()
+	resp, err := http.Get(base + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz = %d", resp.StatusCode)
+	}
+	req, _ := http.NewRequest(http.MethodPut, base+"/v1/bkt", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create bucket = %d", resp.StatusCode)
+	}
+	req, _ = http.NewRequest(http.MethodPut, base+"/v1/bkt/k", bytes.NewReader([]byte("payload")))
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT = %d", resp.StatusCode)
+	}
+	resp, err = http.Get(base + "/v1/bkt/k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "payload" {
+		t.Fatalf("GET = %d %q", resp.StatusCode, body)
 	}
 
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read pipe: %v", err)
-	}
-	got := strings.TrimSpace(string(out))
-	if want := "coordinator " + version; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve returned %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return after cancel")
 	}
 }
