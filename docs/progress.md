@@ -1,9 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C24. C24: cmd/bench load generator + scripts/bench.sh (PUT/GET × 3 sizes × 3 concurrencies, 3-run medians, RF=3/W=2 vs RF=1/W=1 by recreating the coordinator) wired to `make bench`; compose RF/W overridable via env.
-C25: was jsut revisions and bug fixes
-Next: C26 — (next roadmap item)
+Done: C1–C26. C26: scripts/demo.sh (status→bucket→8 MiB PUT→locate→GET→stop holder→GET→repair→corrupt→GET→repair→restart→metrics→go test -race) wired to `make demo` (`make demo -- -y` skips pauses); MIT LICENSE; go mod tidy no-op.
+Next: C27 — (next roadmap item)
 
 ## Hours ledger
 | Item | Est | Actual | Notes |
@@ -33,5 +32,6 @@ Next: C26 — (next roadmap item)
 | C23 | | | Checks
 | C24 | | | cmd/bench -race -count=5 clean; `make bench` printed both tables against `make up`; the compose x-node anchor's CAIRN_HEARTBEAT_INTERVAL never reached the nodes (a service `environment:` replaces the anchor's map, it doesn't merge) so `make up` flapped DOWN/UP every 5s at idle and every bench cell hit InsufficientReplicas — fixed by repeating the interval per node; in-flight requests finish at the deadline rather than being cancelled, so the measured window is ≥ duration, never exactly it; heartbeats still starve behind PUT commits on the single DB conn under put 32MiB c=32 (10 errors in that cell); GET pre-population of 64 × 32MiB dominates the GET rows' wall time |
 | C25 | | | Revisons and fixes
+| C26 | | | `make demo -- -y` PASS in 60s from `make down && make up`; make lint test clean; after `--` make turns `-y` into a goal, so the Makefile has a no-op `-y` target and forwards `$(filter -y,$(MAKECMDGOALS))`; the corrupt-copy dip in locate lasts ~350ms (drop + re-repair onto the same node within one tick) so the demo detects it via cairn_integrity_failures_total and the node's quarantine/ listing, not a locate poll — smoke.sh's RF−1 locate assertion is the same race and only passes by tick timing |
 
 
