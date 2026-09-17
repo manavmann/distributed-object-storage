@@ -1,12 +1,17 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/manavmann/distributed-object-storage/internal/cluster"
+	"github.com/manavmann/distributed-object-storage/internal/meta"
+	"github.com/manavmann/distributed-object-storage/internal/nodeclient"
 	"github.com/manavmann/distributed-object-storage/internal/testcluster"
 )
 
@@ -173,4 +178,56 @@ func TestFailedQuorumStrayReclaimed(t *testing.T) {
 	testcluster.WaitFor(t, func() bool {
 		return pendingCount(t, c) == 0 && blobCounts(t, c)[c.NodeID(0)] == 0
 	}, "stray copy reclaimed")
+}
+
+// seedBlob writes body to node i as blob id, bypassing the coordinator, as
+// a PUT that crashed mid-replication would have left it.
+func seedBlob(t *testing.T, c *testcluster.Cluster, i int, id string, body []byte) {
+	t.Helper()
+	sum := sha256.Sum256(body)
+	if err := nodeclient.New().Put(context.Background(), c.NodeURL(i), id, bytes.NewReader(body), int64(len(body)), hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("seed %s on %s: %v", id, c.NodeID(i), err)
+	}
+}
+
+func TestStaleUploadIntentSweptOnRestart(t *testing.T) {
+	t.Parallel()
+	const nodes = 2
+	c := gcCluster(t, nodes, testcluster.Opts{})
+	ctx := context.Background()
+
+	// Two uploads that never committed: one whose coordinator died long
+	// ago, one that is younger than 2× the node timeout and so might still
+	// have a node write in flight.
+	const staleID, freshID = "stale-upload", "fresh-upload"
+	seedBlob(t, c, 0, staleID, []byte("orphan"))
+	seedBlob(t, c, 0, freshID, []byte("in flight"))
+	intents := []meta.PendingUpload{
+		{BlobID: staleID, Bucket: "bkt", Key: "old", StartedAt: time.Now().Add(-time.Hour).UnixMilli()},
+		{BlobID: freshID, Bucket: "bkt", Key: "new", StartedAt: time.Now().UnixMilli()},
+	}
+	for _, u := range intents {
+		if err := c.Meta().BeginUpload(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c.RestartCoordinator()
+
+	testcluster.WaitFor(t, func() bool {
+		return pendingCount(t, c) == 0 && !c.HasBlob(0, staleID)
+	}, "stale upload reclaimed and the queue drained")
+	if !c.Quarantined(0, staleID) {
+		t.Fatalf("%s reclaimed %s without quarantining it", c.NodeID(0), staleID)
+	}
+	if !c.HasBlob(0, freshID) {
+		t.Fatalf("fresh upload %s was reclaimed", freshID)
+	}
+	left, err := c.Meta().PendingUploads(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || left[0] != intents[1] {
+		t.Fatalf("intents after restart = %+v; want only %+v", left, intents[1])
+	}
 }

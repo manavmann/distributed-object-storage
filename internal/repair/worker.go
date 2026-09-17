@@ -69,8 +69,8 @@ func (w *Worker) SkippedNoSource() int64 {
 }
 
 // tick is one pass of the worker: step 1 garbage-collects pending_deletes,
-// step 2 re-replicates under-replicated blobs. The sweep of stale
-// pending_uploads (step 3) follows once it exists.
+// step 2 re-replicates under-replicated blobs. Stale pending_uploads are
+// swept into pending_deletes by the coordinator at startup, not here.
 func (w *Worker) tick(ctx context.Context) {
 	w.gc(ctx)
 	w.rereplicate(ctx)

@@ -296,6 +296,14 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := hex.EncodeToString(digest.Sum(nil))
 
+	// The intent is durable before any node sees the blob, so a coordinator
+	// crash from here on leaves a row the startup sweep reclaims from.
+	intent := meta.PendingUpload{BlobID: blobID, Bucket: bucket, Key: key, StartedAt: time.Now().UnixMilli()}
+	if err := s.meta.BeginUpload(r.Context(), intent); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+
 	res, err := s.writer.Write(r.Context(), key, blobID, size, sum, spool)
 	for _, a := range res.Failed {
 		s.log.Warn("replica_write_failed", "request_id", httpx.RequestIDFrom(r.Context()),
@@ -304,7 +312,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Copies that did land are unreferenced; queue them for the GC
 		// worker rather than deleting inline.
-		s.queueStrays(r, blobID, res.Succeeded)
+		s.abortUpload(r, blobID, res.Succeeded)
 		s.writeError(w, r, fmt.Errorf("%w: %w", ErrInsufficientReplicas, err))
 		return
 	}
@@ -315,7 +323,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 	obj := meta.Object{Bucket: bucket, Key: key, BlobID: blobID, Size: size, SHA256: sum, ContentType: contentType}
 	if err := s.meta.CommitObject(r.Context(), obj, res.Succeeded); err != nil {
-		s.queueStrays(r, blobID, res.Succeeded)
+		s.abortUpload(r, blobID, res.Succeeded)
 		s.writeError(w, r, err)
 		return
 	}
@@ -326,16 +334,14 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// queueStrays puts blobID on nodeIDs into pending_deletes: the copies were
-// written but the object was never committed. A failure to queue is
-// logged, not returned, because the response has already been decided.
-func (s *Server) queueStrays(r *http.Request, blobID string, nodeIDs []string) {
-	if len(nodeIDs) == 0 {
-		return
-	}
+// abortUpload ends a PUT whose object will never be committed: the copies
+// that landed on nodeIDs go into pending_deletes and the upload intent is
+// dropped. A failure here is logged, not returned, because the response
+// has already been decided; the startup sweep covers the intent.
+func (s *Server) abortUpload(r *http.Request, blobID string, nodeIDs []string) {
 	// The client may already be gone, so the queueing must not die with
 	// its request.
-	if err := s.meta.EnqueueDeletes(context.WithoutCancel(r.Context()), blobID, nodeIDs); err != nil {
+	if err := s.meta.AbortUpload(context.WithoutCancel(r.Context()), blobID, nodeIDs); err != nil {
 		s.log.Error("api.orphan_blob", "request_id", httpx.RequestIDFrom(r.Context()),
 			"blob_id", blobID, "node_ids", nodeIDs, "err", err)
 	}

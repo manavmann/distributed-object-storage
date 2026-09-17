@@ -508,6 +508,106 @@ func (d *DB) EnqueueDeletes(ctx context.Context, blobID string, nodeIDs []string
 	})
 }
 
+// PendingUpload is a row of pending_uploads: a PUT that has picked a blob
+// id and is about to write it to nodes. StartedAt is when the PUT began.
+type PendingUpload struct {
+	BlobID    string
+	Bucket    string
+	Key       string
+	StartedAt int64
+}
+
+// BeginUpload records that u.BlobID is about to be written to nodes, so a
+// coordinator crash before CommitObject leaves a trace to reclaim it from.
+func (d *DB) BeginUpload(ctx context.Context, u PendingUpload) error {
+	_, err := d.db.ExecContext(ctx, `INSERT INTO pending_uploads (blob_id, bucket, key, started_at) VALUES (?, ?, ?, ?)`,
+		u.BlobID, u.Bucket, u.Key, u.StartedAt)
+	if err != nil {
+		return fmt.Errorf("meta: begin upload %s: %w", u.BlobID, err)
+	}
+	return nil
+}
+
+// AbortUpload ends a PUT that will not commit: the copies that landed on
+// nodeIDs are queued for deletion and the upload intent is dropped, in one
+// transaction.
+func (d *DB) AbortUpload(ctx context.Context, blobID string, nodeIDs []string) error {
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		ts := now()
+		for _, id := range nodeIDs {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO pending_deletes (blob_id, node_id, enqueued_at) VALUES (?, ?, ?)`, blobID, id, ts); err != nil {
+				return fmt.Errorf("meta: enqueue delete %s on %s: %w", blobID, id, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_uploads WHERE blob_id = ?`, blobID); err != nil {
+			return fmt.Errorf("meta: clear pending upload %s: %w", blobID, err)
+		}
+		return nil
+	})
+}
+
+// SweepStaleUploads reclaims every upload intent older than maxAge: its
+// blob is queued for deletion on every known node, since nobody recorded
+// which nodes it reached, and the intent is dropped. Both happen in one
+// transaction. It returns the swept intents.
+func (d *DB) SweepStaleUploads(ctx context.Context, maxAge time.Duration) ([]PendingUpload, error) {
+	var swept []PendingUpload
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		ts := now()
+		cutoff := ts - maxAge.Milliseconds()
+		_, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO pending_deletes (blob_id, node_id, enqueued_at)
+			SELECT u.blob_id, n.node_id, ? FROM pending_uploads u CROSS JOIN nodes n
+			WHERE u.started_at < ?`, ts, cutoff)
+		if err != nil {
+			return fmt.Errorf("meta: queue stale uploads: %w", err)
+		}
+		rows, err := tx.QueryContext(ctx, `
+			DELETE FROM pending_uploads WHERE started_at < ?
+			RETURNING blob_id, bucket, key, started_at`, cutoff)
+		if err != nil {
+			return fmt.Errorf("meta: sweep stale uploads: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var u PendingUpload
+			if err := rows.Scan(&u.BlobID, &u.Bucket, &u.Key, &u.StartedAt); err != nil {
+				return fmt.Errorf("meta: sweep stale uploads: %w", err)
+			}
+			swept = append(swept, u)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("meta: sweep stale uploads: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return swept, nil
+}
+
+// PendingUploads returns every upload intent, oldest first.
+func (d *DB) PendingUploads(ctx context.Context) ([]PendingUpload, error) {
+	rows, err := d.db.QueryContext(ctx, `SELECT blob_id, bucket, key, started_at FROM pending_uploads ORDER BY started_at, blob_id`)
+	if err != nil {
+		return nil, fmt.Errorf("meta: pending uploads: %w", err)
+	}
+	defer rows.Close()
+	var out []PendingUpload
+	for rows.Next() {
+		var u PendingUpload
+		if err := rows.Scan(&u.BlobID, &u.Bucket, &u.Key, &u.StartedAt); err != nil {
+			return nil, fmt.Errorf("meta: pending uploads: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("meta: pending uploads: %w", err)
+	}
+	return out, nil
+}
+
 // CountPending returns the number of (blob, node) pairs in pending_deletes.
 func (d *DB) CountPending(ctx context.Context) (int, error) {
 	var n int

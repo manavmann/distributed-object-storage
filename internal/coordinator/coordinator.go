@@ -47,9 +47,10 @@ type Coordinator struct {
 }
 
 // New prepares DATA_DIR/spool, loads the node registry from metadata and
-// builds the API handler and repair worker. Spool files left by a previous
-// run are removed: their uploads were never committed. Nothing runs until
-// Start.
+// builds the API handler and repair worker. Leftovers of a previous run
+// are reclaimed: spool files are removed, and upload intents older than
+// twice the node timeout, so no node can still be writing their blob, are
+// queued for deletion on every known node. Nothing runs until Start.
 func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 	spoolDir := filepath.Join(cfg.DataDir, "spool")
 	if err := os.RemoveAll(spoolDir); err != nil {
@@ -57,6 +58,14 @@ func New(cfg config.CoordinatorConfig, deps Deps) (*Coordinator, error) {
 	}
 	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
 		return nil, fmt.Errorf("coordinator: spool dir: %w", err)
+	}
+	swept, err := deps.Meta.SweepStaleUploads(context.Background(), 2*cfg.NodeTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: sweep uploads: %w", err)
+	}
+	for _, u := range swept {
+		deps.Log.Info("upload_intent_swept", "blob_id", u.BlobID, "bucket", u.Bucket, "key", u.Key,
+			"started_at", time.UnixMilli(u.StartedAt).UTC().Format(time.RFC3339Nano))
 	}
 	nodes, err := cluster.Load(context.Background(), deps.Meta, cfg.HeartbeatTimeout, time.Now, deps.Log)
 	if err != nil {

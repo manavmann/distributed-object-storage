@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openTemp(t *testing.T) (*DB, string) {
@@ -591,5 +592,76 @@ func TestAddReplicaIfLive(t *testing.T) {
 	}
 	if added, err := db.AddReplicaIfLive(ctx, "never-committed", "n1"); err != nil || added {
 		t.Fatalf("AddReplicaIfLive(unknown blob) = %v, %v; want false", added, err)
+	}
+}
+
+func TestPendingUploads(t *testing.T) {
+	db, _ := openTemp(t)
+	ctx := context.Background()
+	mustCreateBucket(t, db, "b")
+	mustUpsertNodes(t, db, "n1", "n2")
+	ts := now()
+
+	// Committing clears the intent.
+	if err := db.BeginUpload(ctx, PendingUpload{BlobID: "committed", Bucket: "b", Key: "k", StartedAt: ts}); err != nil {
+		t.Fatal(err)
+	}
+	mustCommit(t, db, "b", "k", "committed", "n1")
+	if got, err := db.PendingUploads(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("PendingUploads after commit = %+v, %v; want none", got, err)
+	}
+
+	// Aborting clears the intent and queues the copies that landed.
+	if err := db.BeginUpload(ctx, PendingUpload{BlobID: "aborted", Bucket: "b", Key: "k", StartedAt: ts}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AbortUpload(ctx, "aborted", []string{"n2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.PendingUploads(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("PendingUploads after abort = %+v, %v; want none", got, err)
+	}
+	if got, err := db.PendingDeletesForNodes(ctx, []string{"n1", "n2"}, 10); err != nil || len(got) != 1 || got[0].BlobID != "aborted" || got[0].NodeID != "n2" {
+		t.Fatalf("pending deletes after abort = %+v, %v; want aborted@n2", got, err)
+	}
+	if err := db.RemovePending(ctx, "aborted", "n2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sweeping takes only intents older than maxAge and queues them on
+	// every node.
+	stale := PendingUpload{BlobID: "stale", Bucket: "b", Key: "old", StartedAt: ts - 10_000}
+	fresh := PendingUpload{BlobID: "fresh", Bucket: "b", Key: "new", StartedAt: ts}
+	for _, u := range []PendingUpload{stale, fresh} {
+		if err := db.BeginUpload(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.BeginUpload(ctx, fresh); err == nil {
+		t.Fatal("duplicate intent accepted")
+	}
+	swept, err := db.SweepStaleUploads(ctx, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(swept) != 1 || swept[0] != stale {
+		t.Fatalf("swept = %+v; want [%+v]", swept, stale)
+	}
+	if got, err := db.PendingUploads(ctx); err != nil || len(got) != 1 || got[0] != fresh {
+		t.Fatalf("PendingUploads after sweep = %+v, %v; want [%+v]", got, err, fresh)
+	}
+	got, err := db.PendingDeletesForNodes(ctx, []string{"n1", "n2"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, p := range got {
+		ids = append(ids, p.BlobID+"@"+p.NodeID)
+	}
+	if fmt.Sprint(ids) != "[stale@n1 stale@n2]" {
+		t.Fatalf("pending deletes after sweep = %v", ids)
+	}
+	if swept, err = db.SweepStaleUploads(ctx, 5*time.Second); err != nil || len(swept) != 0 {
+		t.Fatalf("second sweep = %+v, %v; want none", swept, err)
 	}
 }
