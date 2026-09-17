@@ -17,6 +17,8 @@ import (
 //	CAIRN_HEARTBEAT_TIMEOUT  15s       silence after which a node is marked DOWN
 //	CAIRN_REPLICATION_FACTOR 3         copies a PUT tries to write (N)
 //	CAIRN_WRITE_QUORUM       2         copies a PUT needs before it commits (W)
+//	CAIRN_REPAIR_INTERVAL    30s       how often the repair/GC worker ticks
+//	CAIRN_REPAIR_GRACE       60s       DOWN time before a node's blobs are re-replicated
 type CoordinatorConfig struct {
 	Addr             string
 	DataDir          string
@@ -26,6 +28,8 @@ type CoordinatorConfig struct {
 	HeartbeatTimeout time.Duration
 	RF               int
 	W                int
+	RepairInterval   time.Duration
+	RepairGrace      time.Duration
 }
 
 // LoadCoordinator builds a CoordinatorConfig from getenv (normally
@@ -72,6 +76,16 @@ func LoadCoordinator(getenv func(string) string) (CoordinatorConfig, error) {
 	if err != nil {
 		return CoordinatorConfig{}, fmt.Errorf("%w: CAIRN_WRITE_QUORUM %q: %w", ErrInvalidConfig, w, err)
 	}
+	repairInterval := get("CAIRN_REPAIR_INTERVAL", "30s")
+	c.RepairInterval, err = time.ParseDuration(repairInterval)
+	if err != nil {
+		return CoordinatorConfig{}, fmt.Errorf("%w: CAIRN_REPAIR_INTERVAL %q: %w", ErrInvalidConfig, repairInterval, err)
+	}
+	repairGrace := get("CAIRN_REPAIR_GRACE", "60s")
+	c.RepairGrace, err = time.ParseDuration(repairGrace)
+	if err != nil {
+		return CoordinatorConfig{}, fmt.Errorf("%w: CAIRN_REPAIR_GRACE %q: %w", ErrInvalidConfig, repairGrace, err)
+	}
 	if err := c.Validate(); err != nil {
 		return CoordinatorConfig{}, err
 	}
@@ -103,6 +117,12 @@ func (c CoordinatorConfig) Validate() error {
 	}
 	if c.W <= 0 || c.W > c.RF {
 		return fmt.Errorf("%w: CAIRN_WRITE_QUORUM must be in [1, %d], got %d", ErrInvalidConfig, c.RF, c.W)
+	}
+	if c.RepairInterval <= 0 {
+		return fmt.Errorf("%w: CAIRN_REPAIR_INTERVAL must be positive, got %s", ErrInvalidConfig, c.RepairInterval)
+	}
+	if c.RepairGrace <= 0 {
+		return fmt.Errorf("%w: CAIRN_REPAIR_GRACE must be positive, got %s", ErrInvalidConfig, c.RepairGrace)
 	}
 	return nil
 }

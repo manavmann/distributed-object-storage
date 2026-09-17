@@ -41,6 +41,13 @@ type Opts struct {
 	// refuses every PUT, so small clusters set both explicitly.
 	RF int
 	W  int
+	// RepairInterval is how often the repair/GC worker ticks. Default 1m,
+	// so queued deletes are only reclaimed in tests that ask for a shorter
+	// interval.
+	RepairInterval time.Duration
+	// RepairGrace is how long a node may be DOWN before its blobs are
+	// re-replicated. Default 1m.
+	RepairGrace time.Duration
 }
 
 // Cluster is a running coordinator plus its nodes. Its methods must be
@@ -92,6 +99,12 @@ func New(t *testing.T, opts Opts) *Cluster {
 	if opts.W == 0 {
 		opts.W = 2
 	}
+	if opts.RepairInterval == 0 {
+		opts.RepairInterval = time.Minute
+	}
+	if opts.RepairGrace == 0 {
+		opts.RepairGrace = time.Minute
+	}
 	c := &Cluster{
 		t:    t,
 		log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -105,6 +118,8 @@ func New(t *testing.T, opts Opts) *Cluster {
 			HeartbeatTimeout: opts.HeartbeatTimeout,
 			RF:               opts.RF,
 			W:                opts.W,
+			RepairInterval:   opts.RepairInterval,
+			RepairGrace:      opts.RepairGrace,
 		},
 	}
 	if err := c.cfg.Validate(); err != nil {

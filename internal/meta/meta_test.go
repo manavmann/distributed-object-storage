@@ -424,3 +424,62 @@ func TestDropReplica(t *testing.T) {
 		t.Fatalf("pending deletes = %d, %v; want 0 (quarantined copy needs no GC)", n, err)
 	}
 }
+
+func TestPendingDeletesQueue(t *testing.T) {
+	db, _ := openTemp(t)
+	ctx := context.Background()
+	if err := db.EnqueueDeletes(ctx, "blob-1", []string{"n1", "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnqueueDeletes(ctx, "blob-2", []string{"n2", "n3"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.PendingDeletesForNodes(ctx, []string{"n1", "n2"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, p := range got {
+		if p.Attempts != 0 || p.EnqueuedAt == 0 {
+			t.Fatalf("fresh row %+v", p)
+		}
+		ids = append(ids, p.BlobID+"@"+p.NodeID)
+	}
+	if fmt.Sprint(ids) != "[blob-1@n1 blob-1@n2 blob-2@n2]" {
+		t.Fatalf("PendingDeletesForNodes(n1,n2) = %v", ids)
+	}
+	if got, err = db.PendingDeletesForNodes(ctx, []string{"n1", "n2", "n3"}, 2); err != nil || len(got) != 2 {
+		t.Fatalf("limit 2: %d rows, %v", len(got), err)
+	}
+	if got, err = db.PendingDeletesForNodes(ctx, nil, 10); err != nil || len(got) != 0 {
+		t.Fatalf("no nodes: %d rows, %v", len(got), err)
+	}
+	if _, err = db.PendingDeletesForNodes(ctx, []string{"n1"}, 0); err == nil {
+		t.Fatal("limit 0 accepted")
+	}
+
+	for want := 1; want <= 2; want++ {
+		if n, err := db.BumpAttempts(ctx, "blob-1", "n1"); err != nil || n != want {
+			t.Fatalf("BumpAttempts #%d = %d, %v", want, n, err)
+		}
+	}
+	if got, err = db.PendingDeletesForNodes(ctx, []string{"n1"}, 10); err != nil || len(got) != 1 || got[0].Attempts != 2 {
+		t.Fatalf("after bumps: %+v, %v", got, err)
+	}
+	if n, err := db.BumpAttempts(ctx, "blob-9", "n1"); err != nil || n != 0 {
+		t.Fatalf("BumpAttempts on missing row = %d, %v; want 0", n, err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := db.RemovePending(ctx, "blob-1", "n1"); err != nil {
+			t.Fatalf("RemovePending #%d: %v", i, err)
+		}
+	}
+	if n, err := db.CountPending(ctx); err != nil || n != 3 {
+		t.Fatalf("CountPending after remove = %d, %v; want 3", n, err)
+	}
+	if got, err = db.PendingDeletesForNodes(ctx, []string{"n1"}, 10); err != nil || len(got) != 0 {
+		t.Fatalf("n1 after remove: %+v, %v", got, err)
+	}
+}

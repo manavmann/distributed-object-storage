@@ -52,6 +52,7 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	cfg := config.CoordinatorConfig{
 		Addr: ":0", DataDir: dataDir,
 		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute, RF: 1, W: 1,
+		RepairInterval: time.Minute, RepairGrace: time.Minute,
 	}
 	db := openMeta(t, dataDir)
 	c, err := New(cfg, Deps{Meta: db, Log: log})
@@ -116,14 +117,15 @@ func TestNewWiresNodeAndServes(t *testing.T) {
 	}
 }
 
-// TestStopWaitsForMonitor checks that Stop returns once the monitor
-// goroutine has exited, so nothing touches the DB after its owner closes
-// it, and that Stop before Start is harmless.
-func TestStopWaitsForMonitor(t *testing.T) {
+// TestStopWaitsForWorkers checks that Stop returns only once the monitor
+// and repair goroutines have exited, so nothing touches the DB after its
+// owner closes it, and that Stop before Start is harmless.
+func TestStopWaitsForWorkers(t *testing.T) {
 	dataDir := t.TempDir()
 	cfg := config.CoordinatorConfig{
 		Addr: ":0", DataDir: dataDir,
 		MaxObjectSize: 1 << 20, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Minute, RF: 1, W: 1,
+		RepairInterval: time.Minute, RepairGrace: time.Minute,
 	}
 	c, err := New(cfg, Deps{Meta: openMeta(t, dataDir), Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
@@ -132,9 +134,5 @@ func TestStopWaitsForMonitor(t *testing.T) {
 	c.Stop()
 	c.Start(context.Background())
 	c.Stop()
-	select {
-	case <-c.monitorDone:
-	default:
-		t.Fatal("monitor still running after Stop")
-	}
+	c.done.Wait()
 }

@@ -506,3 +506,74 @@ func (d *DB) CountPending(ctx context.Context) (int, error) {
 	}
 	return n, nil
 }
+
+// PendingDelete is a row of pending_deletes: one copy of a blob that no
+// object references any more, waiting to be removed from a node.
+type PendingDelete struct {
+	BlobID     string
+	NodeID     string
+	Attempts   int
+	EnqueuedAt int64
+}
+
+// PendingDeletesForNodes returns up to limit queued deletes whose node is
+// one of nodeIDs, oldest first. It returns nothing for an empty nodeIDs.
+func (d *DB) PendingDeletesForNodes(ctx context.Context, nodeIDs []string, limit int) ([]PendingDelete, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("meta: pending deletes: limit must be positive, got %d", limit)
+	}
+	if len(nodeIDs) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(nodeIDs)+1)
+	for _, id := range nodeIDs {
+		args = append(args, id)
+	}
+	args = append(args, limit)
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT blob_id, node_id, attempts, enqueued_at FROM pending_deletes
+		WHERE node_id IN (?`+strings.Repeat(", ?", len(nodeIDs)-1)+`)
+		ORDER BY enqueued_at, blob_id, node_id LIMIT ?`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("meta: pending deletes: %w", err)
+	}
+	defer rows.Close()
+	var out []PendingDelete
+	for rows.Next() {
+		var p PendingDelete
+		if err := rows.Scan(&p.BlobID, &p.NodeID, &p.Attempts, &p.EnqueuedAt); err != nil {
+			return nil, fmt.Errorf("meta: pending deletes: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("meta: pending deletes: %w", err)
+	}
+	return out, nil
+}
+
+// RemovePending drops the queued delete of blobID on nodeID because the
+// node no longer serves the copy. Removing a row that is not queued is
+// not an error.
+func (d *DB) RemovePending(ctx context.Context, blobID, nodeID string) error {
+	if _, err := d.db.ExecContext(ctx, `DELETE FROM pending_deletes WHERE blob_id = ? AND node_id = ?`, blobID, nodeID); err != nil {
+		return fmt.Errorf("meta: remove pending %s on %s: %w", blobID, nodeID, err)
+	}
+	return nil
+}
+
+// BumpAttempts records one more failed attempt to delete blobID on nodeID
+// and returns the new count. It returns 0 if the row is no longer queued.
+func (d *DB) BumpAttempts(ctx context.Context, blobID, nodeID string) (int, error) {
+	var n int
+	err := d.db.QueryRowContext(ctx, `
+		UPDATE pending_deletes SET attempts = attempts + 1
+		WHERE blob_id = ? AND node_id = ? RETURNING attempts`, blobID, nodeID).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("meta: bump attempts %s on %s: %w", blobID, nodeID, err)
+	}
+	return n, nil
+}

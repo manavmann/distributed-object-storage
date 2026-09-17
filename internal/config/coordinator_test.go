@@ -17,6 +17,8 @@ func TestLoadCoordinatorTable(t *testing.T) {
 		"CAIRN_HEARTBEAT_TIMEOUT":  "6s",
 		"CAIRN_REPLICATION_FACTOR": "5",
 		"CAIRN_WRITE_QUORUM":       "4",
+		"CAIRN_REPAIR_INTERVAL":    "2s",
+		"CAIRN_REPAIR_GRACE":       "10s",
 	}
 	with := func(k, v string) map[string]string {
 		m := map[string]string{}
@@ -35,12 +37,12 @@ func TestLoadCoordinatorTable(t *testing.T) {
 		{name: "defaults", env: nil, want: CoordinatorConfig{
 			Addr: ":9000", DataDir: "./data",
 			MaxObjectSize: 64 << 20, MaxUploads: 16, NodeTimeout: 30 * time.Second, HeartbeatTimeout: 15 * time.Second,
-			RF: 3, W: 2,
+			RF: 3, W: 2, RepairInterval: 30 * time.Second, RepairGrace: 60 * time.Second,
 		}},
 		{name: "all set", env: full, want: CoordinatorConfig{
 			Addr: "127.0.0.1:0", DataDir: "/var/cairn",
 			MaxObjectSize: 1024, MaxUploads: 2, NodeTimeout: 5 * time.Second, HeartbeatTimeout: 6 * time.Second,
-			RF: 5, W: 4,
+			RF: 5, W: 4, RepairInterval: 2 * time.Second, RepairGrace: 10 * time.Second,
 		}},
 		{name: "bad size", env: with("CAIRN_MAX_OBJECT_SIZE", "big"), bad: true},
 		{name: "zero size", env: with("CAIRN_MAX_OBJECT_SIZE", "0"), bad: true},
@@ -55,6 +57,10 @@ func TestLoadCoordinatorTable(t *testing.T) {
 		{name: "bad quorum", env: with("CAIRN_WRITE_QUORUM", "two"), bad: true},
 		{name: "zero quorum", env: with("CAIRN_WRITE_QUORUM", "0"), bad: true},
 		{name: "quorum above rf", env: with("CAIRN_WRITE_QUORUM", "6"), bad: true},
+		{name: "bad repair interval", env: with("CAIRN_REPAIR_INTERVAL", "often"), bad: true},
+		{name: "zero repair interval", env: with("CAIRN_REPAIR_INTERVAL", "0s"), bad: true},
+		{name: "bad repair grace", env: with("CAIRN_REPAIR_GRACE", "soon"), bad: true},
+		{name: "negative repair grace", env: with("CAIRN_REPAIR_GRACE", "-1s"), bad: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,7 +82,7 @@ func TestLoadCoordinatorTable(t *testing.T) {
 }
 
 func TestCoordinatorValidate(t *testing.T) {
-	good := CoordinatorConfig{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 1, W: 1}
+	good := CoordinatorConfig{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 1, W: 1, RepairInterval: time.Second, RepairGrace: time.Second}
 	if err := good.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -86,6 +92,8 @@ func TestCoordinatorValidate(t *testing.T) {
 		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: 0, RF: 1, W: 1},
 		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 0, W: 0},
 		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 2, W: 3},
+		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 1, W: 1, RepairInterval: 0, RepairGrace: time.Second},
+		{Addr: ":1", DataDir: "d", MaxObjectSize: 1, MaxUploads: 1, NodeTimeout: time.Second, HeartbeatTimeout: time.Second, RF: 1, W: 1, RepairInterval: time.Second, RepairGrace: 0},
 	} {
 		if err := bad.Validate(); !errors.Is(err, ErrInvalidConfig) {
 			t.Errorf("Validate(%+v) = %v, want ErrInvalidConfig", bad, err)
