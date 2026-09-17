@@ -188,13 +188,23 @@ func (w *Worker) rereplicate(ctx context.Context) {
 
 // copy streams blob c from source to target and, if the object still
 // references the blob, records the new replica. If the object went away
-// while the copy was in flight the fresh copy is queued for deletion.
+// while the copy was in flight the fresh copy is queued for deletion. A
+// source that reports its copy corrupt has quarantined it, so its replica
+// row is dropped, as a failover read would, and the blob waits for the
+// next tick to pick another source.
 func (w *Worker) copy(ctx context.Context, c meta.UnderReplicated, source meta.Replica, target, targetAddr string) {
 	start := time.Now()
 	w.Log.Info("repair_started", "blob_id", c.BlobID, "source", source.NodeID, "target", target)
 	reqCtx, cancel := context.WithTimeout(ctx, w.Timeout)
 	defer cancel()
 	blob, err := w.Client.Get(reqCtx, source.Addr, c.BlobID)
+	if errors.Is(err, nodeclient.ErrIntegrity) {
+		w.Log.Warn("integrity_failure", "blob_id", c.BlobID, "node_id", source.NodeID, "err", err)
+		if derr := w.DB.DropReplica(ctx, c.BlobID, source.NodeID); derr != nil {
+			w.Log.Error("repair_failed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", derr)
+		}
+		return
+	}
 	if err != nil {
 		w.Log.Error("repair_failed", "blob_id", c.BlobID, "source", source.NodeID, "target", target, "err", err)
 		return

@@ -1,8 +1,8 @@
 # Progress
 
 ## State
-Done: C1–C15. C15: internal/repair.Worker (one goroutine, tick → gc); pending_deletes drained via node DELETE with attempts back-off; meta.PendingDeletesForNodes/RemovePending/BumpAttempts; CAIRN_REPAIR_INTERVAL/GRACE now read by config; coordinator.Start runs monitor + worker.
-Next: C16 — (next roadmap item)
+Done: C1–C17. C17: corruption loop closed — repair drops the source's replica row on ErrIntegrity (was a stale-row leak); scripts/corrupt.sh + smoke corruption step; docs/failure-model.md started; 3 harness tests for 1/2/3 corrupt copies.
+Next: C18 — (next roadmap item)
 
 ## Hours ledger
 | Item | Est | Actual | Notes |
@@ -22,3 +22,5 @@ Next: C16 — (next roadmap item)
 | C13 | integration -race -count=3 in 7.6s; HEAD now hits a node (full verify) and 503s like GET when no replica is reachable; a HEAD 503 has no body so the harness only sees the status; corrupt-copy rows are dropped, not queued (node already quarantined the file) |
 | C14 | smoke PASS in ~6.5s: DOWN within 3s heartbeat timeout, UP <1s after start; CAIRN_ADVERTISE_ADDR must be a full URL (config rejects nodeN:9000); CAIRN_REPAIR_INTERVAL/GRACE set in compose but not read by config until repair lands; smoke trap restarts a stopped node on failure |
 | C15 | repair+integration -race -count=3 in ~9s; Placement field omitted (placement is a stateless package), back-off filtered in the worker not SQL; harness RepairInterval defaults to 1m so pre-GC pending-count assertions stay exact; node DELETE quarantines rather than unlinks, so "reclaimed" = gone from blobs/, present in quarantine/ |
+| C16 | | | internal+integration -race -count=3 in ~13s; repair ranks by key (same as the writer), not bucket/key; HangWrites cuts the PUT before the node stores anything so the stale-copy path is covered by a repair unit test whose target deletes the object mid-PUT; no_source test needs grace > monitor sweep (1s) so three kills land before any repair; holders is fetched per candidate inside the same tx rather than group_concat |
+| C17 | | | Go chain (quarantine→ErrIntegrity→drop→repair) was already wired; the only hole was repair reading a corrupt source. Corruption is read-triggered, so "two corrupt → repaired" must keep GETting until both are visited (reads shuffle). Git Bash rewrites /data paths in docker args — keep them inside sh -c. Compose nodes heartbeat every 5s (default) vs 3s coordinator timeout, so nodes flap DOWN/UP every 5s in `make up`; smoke passes anyway. |

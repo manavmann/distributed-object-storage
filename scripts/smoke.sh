@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end smoke test against a running Cairn (make up), including a
-# failover: one replica holder is stopped mid-test. Prints PASS or fails.
+# End-to-end smoke test against a running Cairn (make up): a failover (one
+# replica holder is stopped mid-test) and a corruption (one copy is flipped on
+# disk, read around, dropped and repaired). Prints PASS or fails.
 set -euo pipefail
 
 CAIRN_URL="${CAIRN_URL:-http://localhost:8080}"
@@ -48,6 +49,12 @@ node_status() {
     | grep -o '{[^{}]*}' \
     | grep "\"node_id\":\"$1\"" \
     | sed -n 's/.*"status":"\([A-Z]*\)".*/\1/p'
+}
+
+# replica_count: locates the object and prints how many holders it has.
+replica_count() {
+  request GET "/cluster/locate?bucket=$BUCKET&key=$KEY" > /dev/null
+  grep -o '"node_id"' "$TMP/body" | wc -l | tr -d ' '
 }
 
 # wait_node_status NODE WANT: polls until NODE reports WANT or fails after 60s.
@@ -107,6 +114,40 @@ echo "start $HOLDER and wait for UP"
 $CAIRN_COMPOSE start "$HOLDER"
 STOPPED_NODE=""
 wait_node_status "$HOLDER" UP
+
+echo "corruption: flip a payload byte on $HOLDER"
+expect 200 "$(request GET "/cluster/locate?bucket=$BUCKET&key=$KEY")" "locate object"
+BLOB_ID="$(sed -n 's/.*"blob_id":"\([^"]*\)".*/\1/p' "$TMP/body")"
+[ -n "$BLOB_ID" ] || { echo "FAIL: locate has no blob_id" >&2; cat "$TMP/body" >&2; echo >&2; exit 1; }
+bash "$(dirname "$0")/corrupt.sh" "$HOLDER" "$BLOB_ID"
+
+echo "get until the corrupt copy is found: every GET must match, locate must drop to $((RF - 1))"
+for _ in $(seq 1 20); do
+  expect 200 "$(request GET "/v1/$BUCKET/$KEY")" "get object with a corrupt copy"
+  [ "$(sha "$TMP/in")" = "$(sha "$TMP/body")" ] || { echo "FAIL: sha256 mismatch after GET with a corrupt copy" >&2; exit 1; }
+  if [ "$(replica_count)" = "$((RF - 1))" ]; then
+    break
+  fi
+done
+[ "$(replica_count)" = "$((RF - 1))" ] || { echo "FAIL: locate still shows $(replica_count) replicas after reads, want $((RF - 1))" >&2; cat "$TMP/body" >&2; echo >&2; exit 1; }
+grep -q "\"node_id\":\"$HOLDER\"" "$TMP/body" && { echo "FAIL: $HOLDER still listed as a holder after serving a corrupt copy" >&2; cat "$TMP/body" >&2; echo >&2; exit 1; }
+
+echo "wait for repair to restore $RF replicas"
+for _ in $(seq 1 60); do
+  if [ "$(replica_count)" = "$RF" ]; then
+    break
+  fi
+  sleep 1
+done
+[ "$(replica_count)" = "$RF" ] || { echo "FAIL: locate shows $(replica_count) replicas after repair, want $RF" >&2; cat "$TMP/body" >&2; echo >&2; exit 1; }
+
+echo "quarantine on $HOLDER holds exactly one file for $BLOB_ID"
+# Earlier runs leave their deleted copies in quarantine/ too, so only this
+# blob's entries count. A repaired copy landing back on $HOLDER lives under
+# blobs/, not quarantine/, so exactly one entry is expected.
+# The path is inside sh -c so that Git Bash on Windows cannot rewrite it.
+QUARANTINED="$(docker run --rm -v "$(docker volume ls -q | grep -- "_${HOLDER}-data\$" | head -1):/data" alpine sh -c 'ls /data/quarantine' | grep "^$BLOB_ID" || true)"
+[ "$QUARANTINED" = "$BLOB_ID" ] || { echo "FAIL: quarantine/ on $HOLDER holds [$QUARANTINED] for $BLOB_ID, want exactly $BLOB_ID" >&2; exit 1; }
 
 echo "head"
 expect 200 "$(request HEAD "/v1/$BUCKET/$KEY" --head)" "head object"
