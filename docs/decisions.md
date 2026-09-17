@@ -5,8 +5,8 @@ Each entry: context, decision, consequences. Add one for every non-stdlib depend
 ## modernc.org/sqlite for the metadata store
 
 Context: the coordinator needs a durable, transactional metadata store with
-real foreign keys and range scans over (bucket, key). CLAUDE.md names it as
-the one allowed database dependency.
+real foreign keys and range scans over (bucket, key). It is the only
+database dependency the project takes.
 
 Decision: use modernc.org/sqlite, a pure-Go transpilation of SQLite, through
 database/sql. No ORM, no migration framework; the schema is one embedded
@@ -23,8 +23,8 @@ what the single-writer coordinator wants anyway.
 ## github.com/prometheus/client_golang for metrics
 
 Context: both binaries need a /metrics endpoint an operator can scrape,
-with counters, gauges and a latency histogram. CLAUDE.md names
-prometheus/client_golang as the one allowed metrics dependency.
+with counters, gauges and a latency histogram. It is the only
+metrics dependency the project takes.
 
 Decision: use prometheus/client_golang directly. internal/metrics builds
 every collector on its own prometheus.NewRegistry() (no promauto, no

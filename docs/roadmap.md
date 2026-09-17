@@ -1,7 +1,7 @@
 # Roadmap
 
 One row per item. Titles for done items are the commit subjects that landed
-them (`git log`); see docs/progress.md for the per-item notes.
+them (`git log`).
 
 | Item | Status | Title |
 |---|---|---|
@@ -27,7 +27,11 @@ them (`git log`); see docs/progress.md for the per-item notes.
 | C20 | done | feat(observability): Prometheus metrics and named events |
 | C21 | done | test: concurrency and restart suites |
 | C22 | done | feat: graceful shutdown, server timeouts, limits, and spool hygiene |
-| C23 | done | no commit of its own; the progress ledger records only "Checks" |
+| C23 | done | verification pass across all suites (no commit of its own) |
 | C24 | done | feat(bench): load generator and benchmark report |
-| C25 | planned | not yet described |
-| C26 | planned | not yet described |
+| C25 | done | docs: architecture, design decisions, failure model |
+| C26 | done | docs: README polish, demo script, MIT license, v1.0 |
+| C27 | done | feat(cairnctl): minimal CLI — mb ls put get rm status locate |
+| C28 | done | feat(storage): background scrubber with heartbeat reporting |
+| C29 | done | feat: shared secret on internal endpoints |
+| C30 | done | docs: rename project to Shardwell |
